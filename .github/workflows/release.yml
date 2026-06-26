@@ -64,6 +64,10 @@ jobs:
 
       # ── Docker build tooling ─────────────────────────────────────────────────
 
+      # QEMU enables building the linux/arm64 variant on the amd64 runner.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -95,6 +99,9 @@ jobs:
           context: .
           file: soma-vault/deploy/Dockerfile
           push: true
+          # Multi-arch so Apple Silicon / ARM cloud (Graviton) can pull natively,
+          # not just amd64. arm64 is emulated on the amd64 runner via QEMU.
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Layer cache stored in GitHub Actions cache for fast rebuilds.
