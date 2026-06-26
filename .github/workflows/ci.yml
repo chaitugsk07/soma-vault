@@ -59,8 +59,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: chaitugsk07/soma-infra
-          path: soma-infra
+          # The soma-infra repo nests the crate under a soma-infra/ subdirectory;
+          # flatten it to the sibling layout the path deps expect.
+          path: _soma-infra-raw
           token: ${{ secrets.SIBLINGS_TOKEN || github.token }}
+
+      - name: Flatten soma-infra checkout
+        run: |
+          if [ -f _soma-infra-raw/soma-infra/Cargo.toml ]; then
+            mv _soma-infra-raw/soma-infra soma-infra
+          else
+            mv _soma-infra-raw soma-infra
+          fi
+          test -f soma-infra/Cargo.toml
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
