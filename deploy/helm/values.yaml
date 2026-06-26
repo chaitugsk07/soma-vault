@@ -1,0 +1,77 @@
+# soma-vault Helm chart values.
+# Override any value with --set or a custom values file.
+
+# -- Container image settings.
+image:
+  repository: ghcr.io/chaitugsk07/soma-vault
+  # Pinning a specific tag (e.g. "v0.1.0") is strongly recommended in production.
+  # "latest" is acceptable for quick trials only.
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# -- Number of pod replicas.  The HPA below will override this at runtime.
+replicaCount: 2
+
+# -- Resource requests/limits.
+# soma-vault is deliberately lightweight; adjust upward as load grows.
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+
+# -- Horizontal Pod Autoscaler configuration.
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# -- Pod Disruption Budget.
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# -- Service configuration.
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# -- Secret: supply credentials via an existing Kubernetes Secret or let the
+# chart create one.  Baking credentials into values.yaml is acceptable for
+# development only; use a secrets manager (e.g. External Secrets Operator)
+# in production.
+secret:
+  # Set to the name of an existing Secret that contains DATABASE_URL and
+  # SOMA_MASTER_KEK_HEX.  When set, the chart will NOT create a new Secret.
+  existingSecret: ""
+
+  # Used only when existingSecret is "".
+  # DATABASE_URL format: postgres://user:pass@host:5432/dbname
+  databaseUrl: ""
+  # 64-character hex master key.  Generate with: soma keygen
+  # IMPORTANT: never commit a real KEK to version control.
+  masterKekHex: ""
+
+# -- Extra environment variables added to the container.
+# Example:
+#   extraEnv:
+#     - name: SOMA_LOG_LEVEL
+#       value: debug
+extraEnv: []
+
+# -- Node selector, tolerations, affinity — left empty for maximum portability.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -- Annotations applied to the Deployment pods.
+podAnnotations: {}
+
+# -- Service account.  Leave name empty to use the default service account.
+serviceAccount:
+  create: false
+  name: ""

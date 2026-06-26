@@ -1,0 +1,23 @@
+[package]
+name = "soma-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aes-gcm = { workspace = true }
+aes-kw = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { workspace = true }
+secrecy = { workspace = true }
+rand = { workspace = true }
+uuid = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+hex = "0.4"
+hmac = { workspace = true }
+
+[dev-dependencies]
+# nothing extra needed

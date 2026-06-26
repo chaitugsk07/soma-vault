@@ -1,0 +1,39 @@
+# Rust build artifacts
+/target
+**/target
+**/*.rs.bk
+
+# Trunk / WASM build output
+dist/
+**/dist/
+
+# Secrets & credentials — NEVER commit
+.env
+.env.*
+!.env.example
+*.creds
+**/secrets/
+soma-root-token
+temp/
+
+# Local databases / vector stores
+*.db
+ruvector.db
+
+# OS / editor cruft
+.DS_Store
+**/.DS_Store
+.idea/
+*.swp
+
+# QA / tooling scratch output
+.playwright-mcp/
+*.log
+
+# JS/TS SDK
+node_modules/
+**/node_modules/
+*.tsbuildinfo
+
+# Local scratch / env
+.soma-env

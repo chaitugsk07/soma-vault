@@ -1,0 +1,38 @@
+# Local dev full stack: postgres + soma-vault.
+# Set TEST_DATABASE_URL=postgres://soma:soma@localhost:5432/soma_vault for integration tests.
+# Copy deploy/.env.example to deploy/.env and set SOMA_MASTER_KEK_HEX before running.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: soma
+      POSTGRES_PASSWORD: soma
+      POSTGRES_DB: soma_vault
+    ports:
+      - "5432:5432"
+    volumes:
+      - soma_vault_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U soma -d soma_vault"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  soma-vault:
+    image: ghcr.io/chaitugsk07/soma-vault:latest
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://soma:soma@postgres:5432/soma_vault
+      SOMA_MASTER_KEK_HEX: "${SOMA_MASTER_KEK_HEX:?set SOMA_MASTER_KEK_HEX in deploy/.env (generate with: docker run --rm ghcr.io/chaitugsk07/soma-vault soma keygen)}"
+      SOMA_COOKIE_SECURE: "false"
+      SOMA_TOKEN_FILE: /tmp/soma-root-token
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Health probe endpoint: GET /health/live (no wget/curl in base image;
+    # ordering is handled by depends_on above).
+
+volumes:
+  soma_vault_pg:

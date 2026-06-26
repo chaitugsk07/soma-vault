@@ -1,0 +1,76 @@
+name: 'soma-vault: inject secrets'
+description: 'Inject soma-vault secrets and config into subsequent workflow steps via $GITHUB_ENV'
+author: 'soma-platform'
+
+inputs:
+  server:
+    description: 'soma-vault server URL (e.g. https://vault.example.com)'
+    required: true
+  token:
+    description: 'soma-vault bearer token (use a GitHub secret)'
+    required: true
+  project:
+    description: 'Project ID or code'
+    required: true
+  environment:
+    description: 'Environment ID or code'
+    required: true
+  only-secrets:
+    description: 'Export only secrets (not config). Not yet implemented — reserved for future use.'
+    required: false
+    default: 'false'
+  only-config:
+    description: 'Export only config (not secrets). Not yet implemented — reserved for future use.'
+    required: false
+    default: 'false'
+  version:
+    description: 'soma CLI version to install (e.g. "0.1.0"). If unset, builds from source.'
+    required: false
+    default: ''
+
+outputs: {}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install soma CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        # If a prebuilt release exists, download it. Otherwise build from source.
+        # NOTE: Until official releases are published to GitHub Releases or GHCR,
+        # this step builds from source via `cargo install`. Set the `version` input
+        # to a released tag once binaries are published to skip the build.
+        if [[ -n "${{ inputs.version }}" ]]; then
+          echo "Downloading soma CLI ${{ inputs.version }} from GitHub Releases..."
+          RELEASE_URL="https://github.com/soma-platform/soma-vault/releases/download/v${{ inputs.version }}/soma-linux-x86_64"
+          curl -fsSL "$RELEASE_URL" -o /usr/local/bin/soma
+          chmod +x /usr/local/bin/soma
+        else
+          echo "No version specified — building soma CLI from source (slow; set 'version' input once releases are published)..."
+          cargo install --path "${{ github.action_path }}/../crates/soma-cli" --locked --quiet
+        fi
+
+    - name: Inject soma-vault secrets into $GITHUB_ENV
+      shell: bash
+      env:
+        SOMA_SERVER: ${{ inputs.server }}
+        SOMA_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        # Export secrets as dotenv, then write each KEY=VALUE to $GITHUB_ENV.
+        # Values are masked in logs so they never appear in plaintext.
+        soma export \
+          --project "${{ inputs.project }}" \
+          --env "${{ inputs.environment }}" \
+          --format dotenv | while IFS='=' read -r key value; do
+            # Skip blank lines and comments.
+            [[ -z "$key" || "$key" == \#* ]] && continue
+            # Strip surrounding quotes from value (dotenv format).
+            value="${value#\"}" ; value="${value%\"}"
+            # Mask the value in GitHub Actions logs.
+            echo "::add-mask::${value}"
+            # Write to GITHUB_ENV so subsequent steps see it.
+            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
+          done
+        echo "soma-vault: secrets injected into environment."

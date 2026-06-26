@@ -1,0 +1,20 @@
+apiVersion: v2
+name: soma-vault
+description: >
+  soma-vault — cloud-native secrets and configuration platform.
+  Stateless pods; Phase 1 uses a software KEK (SOMA_MASTER_KEK_HEX).
+  KMS auto-unseal via workload identity is on the roadmap (Phase 2).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/chaitugsk07/soma-vault
+sources:
+  - https://github.com/chaitugsk07/soma-vault
+keywords:
+  - secrets
+  - configuration
+  - vault
+  - security
+maintainers:
+  - name: Chaitu Gaddek
+    email: dev@kreesalis.com

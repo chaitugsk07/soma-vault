@@ -1,0 +1,99 @@
+name: CI
+
+# soma-vault depends on its siblings by PATH (../soma-schema, ../soma-ui,
+# ../../../soma-infra) during development, so CI checks them out next to this
+# repo before building. For PRIVATE sibling repos, add a PAT with read access as
+# the `SIBLINGS_TOKEN` secret; for public repos the default token is enough.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: soma
+          POSTGRES_PASSWORD: soma
+          POSTGRES_DB: soma_vault
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      TEST_DATABASE_URL: postgres://soma:soma@localhost:5432/soma_vault
+
+    defaults:
+      run:
+        working-directory: soma-vault
+
+    steps:
+      - name: Checkout soma-vault
+        uses: actions/checkout@v4
+        with:
+          path: soma-vault
+
+      - name: Checkout soma-schema (sibling path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: chaitugsk07/soma-schema
+          path: soma-schema
+          token: ${{ secrets.SIBLINGS_TOKEN || github.token }}
+
+      - name: Checkout soma-ui (sibling path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: chaitugsk07/soma-ui
+          path: soma-ui
+          token: ${{ secrets.SIBLINGS_TOKEN || github.token }}
+
+      - name: Checkout soma-infra (sibling path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: chaitugsk07/soma-infra
+          path: soma-infra
+          token: ${{ secrets.SIBLINGS_TOKEN || github.token }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.0
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            soma-vault/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('soma-vault/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo check (workspace)
+        run: cargo check --workspace
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Dashboard build (wasm32 + trunk)
+        run: |
+          cargo check --manifest-path dashboard/Cargo.toml --target wasm32-unknown-unknown
+          cd dashboard && trunk build

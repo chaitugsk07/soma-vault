@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "soma-vault.fullname" . }}
+  labels:
+    {{- include "soma-vault.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.hpa.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "soma-vault.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "soma-vault.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ .Values.serviceAccount.name | default (include "soma-vault.fullname" .) }}
+      {{- end }}
+      # soma-vault pods are stateless.
+      # Phase 1: the master key is supplied via SOMA_MASTER_KEK_HEX (Kubernetes Secret).
+      # KMS auto-unseal by workload identity is on the roadmap (Phase 2).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: soma-vault
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: SOMA_BIND
+              value: "0.0.0.0:8080"
+            # SOMA_COOKIE_SECURE should be "true" behind a TLS-terminating
+            # ingress (the default in the server binary).  Set to "false" only
+            # for local HTTP-only testing.
+            - name: SOMA_COOKIE_SECURE
+              value: "true"
+            - name: SOMA_TOKEN_FILE
+              value: /tmp/soma-root-token
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "soma-vault.secretName" . }}
+                  key: DATABASE_URL
+            - name: SOMA_MASTER_KEK_HEX
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "soma-vault.secretName" . }}
+                  key: SOMA_MASTER_KEK_HEX
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # startupProbe gates liveness/readiness until the server is up.
+          # failureThreshold * periodSeconds = 150s window for slow first-boot migrations.
+          startupProbe:
+            httpGet:
+              path: /health/startup
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # /tmp is needed for the root-token file write on first boot.
+          # migrations/ is read-only and baked into the image.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

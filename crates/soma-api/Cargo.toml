@@ -1,0 +1,28 @@
+[package]
+name = "soma-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+soma-storage = { path = "../soma-storage" }
+soma-crypto = { path = "../soma-crypto" }
+axum = { workspace = true }
+axum-extra = { version = "0.10", features = ["cookie"] }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["set-header"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+http = "1"
+
+[dev-dependencies]
+tokio = { workspace = true }
+soma-infra = { path = "../../../soma-infra", features = ["testing"] }
+tower = { workspace = true, features = ["util"] }
+sha2 = { workspace = true }
+hex = "0.4"
+sqlx = { workspace = true }

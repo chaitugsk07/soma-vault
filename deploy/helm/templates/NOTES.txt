@@ -1,0 +1,19 @@
+soma-vault {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+
+1. Get the root token (written to /tmp/soma-root-token on first boot):
+
+   kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "soma-vault.fullname" . }} -- cat /tmp/soma-root-token
+
+2. Port-forward to reach the API locally:
+
+   kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "soma-vault.fullname" . }} 8080:80
+
+3. First commands (replace <token> with the value from step 1):
+
+   soma login --server http://localhost:8080 --token <token>
+   soma init
+   soma run -- <your command>
+
+WARNING: SOMA_MASTER_KEK_HEX is stored in a Kubernetes Secret; a Postgres dump
+combined with that key can decrypt all secrets. For production, replace this
+with a real KMS (AWS/GCP/Azure workload-identity auto-unseal — see roadmap).

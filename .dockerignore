@@ -1,0 +1,46 @@
+# This file must live at the BUILD CONTEXT root (soma-platform/.dockerignore)
+# to take effect with: docker build -f soma-vault/deploy/Dockerfile -t soma-vault:dev .
+#
+# Currently placed at soma-vault/.dockerignore for version-control convenience.
+# Copy it to the parent (soma-platform/.dockerignore) before running the build,
+# OR use soma-vault/deploy/Dockerfile.dockerignore (BuildKit 23.0+ Dockerfile-adjacent form).
+#
+# Without this file in place the build context balloons to ~13 GB due to
+# soma-ui/flutter/ build artifacts and Rust target/ directories.
+
+# Rust build artifacts — largest exclusion by far.
+soma-vault/target/
+soma-schema/target/
+soma-common/target/
+soma-ui/web/target/
+soma-ui/flutter/
+
+# Dashboard build artifacts (embedded at compile time; built in the Docker image).
+soma-vault/dashboard/target/
+soma-vault/dashboard/dist/
+
+# Git metadata.
+**/.git/
+**/.gitignore
+**/.gitattributes
+
+# Node / npm artifacts.
+**/node_modules/
+**/dist/
+**/build/
+
+# OS / editor noise.
+**/.DS_Store
+**/*.swp
+**/*.swo
+**/.idea/
+**/.vscode/
+
+# Playwright / test screenshots.
+soma-vault/.playwright-mcp/
+soma-vault/step*.png
+
+# Secrets and local env files — never in the build context.
+**/.env
+**/.env.*
+**/secrets/

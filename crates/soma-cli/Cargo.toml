@@ -1,0 +1,32 @@
+[package]
+name = "soma-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "soma"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+dirs = "5"
+soma-crypto = { path = "../soma-crypto" }
+soma-schema = { workspace = true }
+soma-infra = { path = "../../../soma-infra", features = ["db", "tracing"] }
+
+[dev-dependencies]
+soma-api = { path = "../soma-api" }
+soma-storage = { path = "../soma-storage" }
+soma-infra = { path = "../../../soma-infra", features = ["testing"] }
+axum = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }

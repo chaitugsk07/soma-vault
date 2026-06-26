@@ -1,0 +1,30 @@
+{
+  "name": "@soma-vault/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript/Node SDK for soma-vault — read secrets and config in-process",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test test/integration.test.mjs",
+    "test:integration": "npm run build && SOMA_SDK_TEST_URL=http://127.0.0.1:18100 SOMA_SDK_TEST_TOKEN=7c09b0744d303488a1042eecc43001448ad895c5e13c52fcc5d99371c7a855df node --test test/integration.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist/"
+  ],
+  "license": "Apache-2.0"
+}
