@@ -776,6 +776,235 @@ impl PgDataStore {
         tx.commit().await.map_err(map_sqlx)?;
         Ok(())
     }
+
+    /// Write or update a secret and record an audit event atomically.
+    ///
+    /// The header upsert, version write, and audit row all commit in a single
+    /// transaction — closing the 3-transaction atomicity gap present in the
+    /// non-audited [`DataStore::put_secret`] path.
+    ///
+    /// # Errors
+    /// Returns [`Error::NotFound`] if the environment does not exist.
+    /// Returns [`Error::Conflict`] on a CAS mismatch.
+    /// Returns [`Error`] on other database or audit failures.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn put_secret_audited(
+        &self,
+        tenant: &crate::types::TenantId,
+        env_id: Uuid,
+        path: &str,
+        plaintext: &[u8],
+        attrs: std::collections::HashMap<String, String>,
+        cas: Option<i32>,
+        ctx: &AuditCtx,
+    ) -> crate::Result<crate::types::SecretVersionMeta> {
+        let mut tx = self.tenant_tx(tenant).await?;
+
+        // QW-7: verify the environment belongs to this tenant before writing.
+        let env_ok: bool = sqlx::query(
+            r#"SELECT 1 FROM "01_vault"."04_fct_environments"
+               WHERE id = $1 AND tenant_id = $2 AND is_deleted = false"#,
+        )
+        .bind(env_id)
+        .bind(tenant.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .is_some();
+
+        if !env_ok {
+            return Err(crate::Error::NotFound);
+        }
+
+        // Upsert the secret header (idempotent on unique(tenant_id,environment_id,path)).
+        let secret: SecretRow = sqlx::query_as(
+            r#"INSERT INTO "01_vault"."05_fct_secrets"
+               (id, tenant_id, environment_id, path, current_version, cas_required, max_versions,
+                is_deleted, created_at, updated_at)
+               VALUES (gen_random_uuid(), $1, $2, $3, 0, false, 20, false, now(), now())
+               ON CONFLICT (tenant_id, environment_id, path)
+               DO UPDATE SET updated_at = "05_fct_secrets".updated_at
+               RETURNING id, tenant_id, environment_id, path, current_version, cas_required,
+                         max_versions, created_at, updated_at"#,
+        )
+        .bind(tenant.0)
+        .bind(env_id)
+        .bind(path)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        // Build the audit event before the version write so it commits together.
+        let audit_ev = self.audit.as_ref().map(|sink| (
+            sink.as_ref(),
+            AuditEvent {
+                source_service: String::new(),
+                idempotency_key: Uuid::new_v4(),
+                tenant_id: tenant.0,
+                event_type: ctx.event_type.to_owned(),
+                actor_id: Some(ctx.actor_id),
+                actor_role: Some(ctx.actor_role.clone()),
+                resource_type: Some(ctx.resource_type.to_owned()),
+                resource_id: Some(ctx.resource_id.clone()),
+                outcome: Outcome::Success,
+                actor_ip: None,
+                occurred_at: chrono::Utc::now(),
+                metadata: serde_json::json!({}),
+            },
+        ));
+
+        // QW-5/QW-8: derive per-tenant KEK, encrypt inside the row lock.
+        let tenant_kek = self.kek.derive_tenant_kek(tenant.0);
+        let new_version = ledger::advance_secret_version_in_tx(
+            &mut tx,
+            &tenant_kek,
+            &self.kek.fingerprint(),
+            tenant.0,
+            secret.id,
+            cas,
+            plaintext,
+            audit_ev.as_ref().map(|(s, e)| (*s, e)),
+        )
+        .await?;
+
+        // Read back the version row for metadata (still inside the same tx).
+        let meta_row: (Uuid, i32, String, String, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+            r#"SELECT secret_id, version, seal_provider, seal_key_id, created_at
+               FROM "01_vault"."06_fct_secret_versions"
+               WHERE secret_id = $1 AND version = $2"#,
+        )
+        .bind(secret.id)
+        .bind(new_version)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        tx.commit().await.map_err(map_sqlx)?;
+
+        // Store EAV attrs after commit (best-effort; not part of the atomic write).
+        if !attrs.is_empty() {
+            attrs::set_attrs(&self.pool, tenant, EntityRef::Secret(secret.id), attrs).await?;
+        }
+
+        Ok(crate::types::SecretVersionMeta {
+            secret_id: meta_row.0,
+            version: meta_row.1,
+            seal_provider: meta_row.2,
+            seal_key_id: meta_row.3,
+            created_at: meta_row.4,
+        })
+    }
+
+    /// Write or update a config key and record an audit event atomically.
+    ///
+    /// The header upsert, version write, and audit row all commit in a single
+    /// transaction — closing the 3-transaction atomicity gap present in the
+    /// non-audited [`DataStore::put_config`] path.
+    ///
+    /// # Errors
+    /// Returns [`Error::NotFound`] if the environment does not exist.
+    /// Returns [`Error`] on other database or audit failures.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn put_config_audited(
+        &self,
+        tenant: &crate::types::TenantId,
+        env_id: Uuid,
+        key: &str,
+        value: &str,
+        value_type: crate::types::ValueType,
+        attrs: std::collections::HashMap<String, String>,
+        ctx: &AuditCtx,
+    ) -> crate::Result<crate::types::ConfigVersion> {
+        value_type.validate(value)?;
+
+        let vt_str = value_type.as_str();
+        let mut tx = self.tenant_tx(tenant).await?;
+
+        // QW-7: verify the environment belongs to this tenant before writing.
+        let env_ok: bool = sqlx::query(
+            r#"SELECT 1 FROM "01_vault"."04_fct_environments"
+               WHERE id = $1 AND tenant_id = $2 AND is_deleted = false"#,
+        )
+        .bind(env_id)
+        .bind(tenant.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .is_some();
+
+        if !env_ok {
+            return Err(crate::Error::NotFound);
+        }
+
+        // Upsert config key header.
+        let ck: ConfigKeyRow = sqlx::query_as(
+            r#"INSERT INTO "01_vault"."07_fct_config_keys"
+               (id, tenant_id, environment_id, key, value_type, current_version,
+                is_deleted, created_at, updated_at)
+               VALUES (gen_random_uuid(), $1, $2, $3, $4, 0, false, now(), now())
+               ON CONFLICT (tenant_id, environment_id, key)
+               DO UPDATE SET updated_at = "07_fct_config_keys".updated_at
+               RETURNING id, tenant_id, environment_id, key, value_type,
+                         current_version, created_at, updated_at"#,
+        )
+        .bind(tenant.0)
+        .bind(env_id)
+        .bind(key)
+        .bind(vt_str)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        // Build the audit event before the version write so it commits together.
+        let audit_ev = self.audit.as_ref().map(|sink| (
+            sink.as_ref(),
+            AuditEvent {
+                source_service: String::new(),
+                idempotency_key: Uuid::new_v4(),
+                tenant_id: tenant.0,
+                event_type: ctx.event_type.to_owned(),
+                actor_id: Some(ctx.actor_id),
+                actor_role: Some(ctx.actor_role.clone()),
+                resource_type: Some(ctx.resource_type.to_owned()),
+                resource_id: Some(ctx.resource_id.clone()),
+                outcome: Outcome::Success,
+                actor_ip: None,
+                occurred_at: chrono::Utc::now(),
+                metadata: serde_json::json!({}),
+            },
+        ));
+
+        let new_version = ledger::advance_config_version_in_tx(
+            &mut tx,
+            tenant.0,
+            ck.id,
+            value,
+            vt_str,
+            audit_ev.as_ref().map(|(s, e)| (*s, e)),
+        )
+        .await?;
+
+        // Read back the version row (still inside the same tx).
+        let ver: ConfigVersionRow = sqlx::query_as(
+            r#"SELECT config_key_id, version, value, value_type, created_at
+               FROM "01_vault"."08_fct_config_versions"
+               WHERE config_key_id = $1 AND version = $2"#,
+        )
+        .bind(ck.id)
+        .bind(new_version)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        tx.commit().await.map_err(map_sqlx)?;
+
+        // Store EAV attrs after commit (best-effort; not part of the atomic write).
+        if !attrs.is_empty() {
+            attrs::set_attrs(&self.pool, tenant, EntityRef::Config(ck.id), attrs).await?;
+        }
+
+        Ok(ver.into())
+    }
 }
 
 // ── Pagination helper ─────────────────────────────────────────────────────────

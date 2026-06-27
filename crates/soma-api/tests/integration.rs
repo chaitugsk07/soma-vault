@@ -815,3 +815,190 @@ async fn test_denial_audit() {
     let has_denied = items.iter().any(|i| i["outcome"].as_str() == Some("denied"));
     assert!(has_denied, "should have a denied audit entry after 403");
 }
+
+// ── Test 11: put_secret atomic audit ─────────────────────────────────────────
+
+#[tokio::test]
+async fn test_put_secret_atomic_audit() {
+    let (state, _guard) = setup().await;
+
+    let (_, token) = state
+        .store
+        .create_token(&TenantId::default(), "put-secret-audit-admin")
+        .await
+        .unwrap();
+
+    // Create project + env so we have a valid target for PUT secret.
+    let proj = state
+        .store
+        .create_project(&TenantId::default(), "ps-audit-proj", "PS Audit", None)
+        .await
+        .unwrap();
+    let env = state
+        .store
+        .create_environment(&TenantId::default(), proj.id, "ps-env", "PS Env", None)
+        .await
+        .unwrap();
+
+    // PUT secret via the HTTP API — uses put_secret_audited path.
+    let secret_uri = format!(
+        "/v1/projects/{}/environments/{}/secrets/ps-audit-key",
+        proj.id, env.id
+    );
+    let resp = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&secret_uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({"value": "atomic-secret-value"})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "PUT secret should succeed");
+
+    // Audit list should contain exactly one "secret.write" entry for this path.
+    let resp = router(state.clone())
+        .oneshot(authed_request("GET", "/v1/audit", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = body_json(resp).await;
+    let items = body["items"].as_array().expect("items array");
+
+    let write_entries: Vec<_> = items
+        .iter()
+        .filter(|i| {
+            i["event_type"].as_str() == Some("secret.write")
+                && i["resource_id"].as_str() == Some("ps-audit-key")
+        })
+        .collect();
+
+    assert_eq!(
+        write_entries.len(),
+        1,
+        "should have exactly one secret.write audit entry for ps-audit-key"
+    );
+    assert_eq!(
+        write_entries[0]["outcome"].as_str(),
+        Some("success"),
+        "audit outcome should be success"
+    );
+    assert_eq!(
+        write_entries[0]["resource_type"].as_str(),
+        Some("secret"),
+        "resource_type should be secret"
+    );
+
+    // Verify chain is intact (proves the audit row is in the chain, not orphaned).
+    let resp = router(state.clone())
+        .oneshot(authed_request("GET", "/v1/audit/verify", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let verify: serde_json::Value = body_json(resp).await;
+    assert_eq!(verify["ok"].as_bool(), Some(true), "chain should be intact after secret write");
+    assert!(
+        verify["entries_checked"].as_u64().unwrap_or(0) > 0,
+        "entries_checked must be > 0"
+    );
+}
+
+// ── Test 12: put_config atomic audit ─────────────────────────────────────────
+
+#[tokio::test]
+async fn test_put_config_atomic_audit() {
+    let (state, _guard) = setup().await;
+
+    let (_, token) = state
+        .store
+        .create_token(&TenantId::default(), "put-config-audit-admin")
+        .await
+        .unwrap();
+
+    // Create project + env so we have a valid target for PUT config.
+    let proj = state
+        .store
+        .create_project(&TenantId::default(), "pc-audit-proj", "PC Audit", None)
+        .await
+        .unwrap();
+    let env = state
+        .store
+        .create_environment(&TenantId::default(), proj.id, "pc-env", "PC Env", None)
+        .await
+        .unwrap();
+
+    // PUT config via the HTTP API — uses put_config_audited path.
+    let config_uri = format!(
+        "/v1/projects/{}/environments/{}/config/pc-audit-key",
+        proj.id, env.id
+    );
+    let resp = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&config_uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::to_vec(
+                        &serde_json::json!({"value": "atomic-config-value", "type": "string"}),
+                    )
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "PUT config should succeed");
+
+    // Audit list should contain exactly one "config.write" entry for this key.
+    let resp = router(state.clone())
+        .oneshot(authed_request("GET", "/v1/audit", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = body_json(resp).await;
+    let items = body["items"].as_array().expect("items array");
+
+    let write_entries: Vec<_> = items
+        .iter()
+        .filter(|i| {
+            i["event_type"].as_str() == Some("config.write")
+                && i["resource_id"].as_str() == Some("pc-audit-key")
+        })
+        .collect();
+
+    assert_eq!(
+        write_entries.len(),
+        1,
+        "should have exactly one config.write audit entry for pc-audit-key"
+    );
+    assert_eq!(
+        write_entries[0]["outcome"].as_str(),
+        Some("success"),
+        "audit outcome should be success"
+    );
+    assert_eq!(
+        write_entries[0]["resource_type"].as_str(),
+        Some("config"),
+        "resource_type should be config"
+    );
+
+    // Verify chain is intact.
+    let resp = router(state.clone())
+        .oneshot(authed_request("GET", "/v1/audit/verify", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let verify: serde_json::Value = body_json(resp).await;
+    assert_eq!(verify["ok"].as_bool(), Some(true), "chain should be intact after config write");
+    assert!(
+        verify["entries_checked"].as_u64().unwrap_or(0) > 0,
+        "entries_checked must be > 0"
+    );
+}

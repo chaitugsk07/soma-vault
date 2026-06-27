@@ -1,6 +1,8 @@
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use soma_audit_core::AuditEvent;
+use soma_audit_pg::LocalSink;
 use soma_crypto::TenantKek;
 
 use crate::error::map_sqlx;
@@ -135,6 +137,97 @@ pub(super) async fn advance_secret_version(
     Ok(new_version)
 }
 
+/// Advance the secret version inside an *already-open* transaction.
+///
+/// The caller is responsible for setting `app.tenant_id` (via [`crate::pg::PgDataStore::tenant_tx`])
+/// before calling this function.  The function does **not** call `tx.commit()` — the
+/// caller owns the transaction lifetime and commits after this returns.
+///
+/// If `audit` is `Some((sink, event))`, the audit row is written to `tx` before
+/// returning, so the version insert and audit row share the same commit.
+///
+/// Returns the new version number.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn advance_secret_version_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    kek: &TenantKek,
+    seal_key_id: &str,
+    tenant_id: Uuid,
+    secret_id: Uuid,
+    cas: Option<i32>,
+    plaintext: &[u8],
+    audit: Option<(&LocalSink, &AuditEvent)>,
+) -> Result<i32> {
+    let row: SecretRow = sqlx::query_as(
+        r#"SELECT id, current_version, cas_required, max_versions
+           FROM "01_vault"."05_fct_secrets"
+           WHERE id = $1 AND tenant_id = $2 AND is_deleted = false
+           FOR UPDATE"#,
+    )
+    .bind(secret_id)
+    .bind(tenant_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx)?
+    .ok_or(crate::Error::NotFound)?;
+
+    if let Some(expected) = cas {
+        if expected != row.current_version {
+            return Err(crate::Error::Conflict(format!(
+                "CAS mismatch: expected version {expected}, current is {}",
+                row.current_version
+            )));
+        }
+    } else if row.cas_required {
+        return Err(crate::Error::Conflict(
+            "CAS is required for this secret but was not provided".to_owned(),
+        ));
+    }
+
+    let new_version = row.current_version + 1;
+
+    let mut sealed = soma_crypto::encrypt(kek, secret_id, i64::from(new_version), plaintext)?;
+    sealed.seal_key_id = seal_key_id.to_owned();
+
+    sqlx::query(
+        r#"INSERT INTO "01_vault"."06_fct_secret_versions"
+           (id, tenant_id, secret_id, version, ciphertext, nonce, wrapped_dek, aad,
+            seal_provider, seal_key_id, created_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, now())"#,
+    )
+    .bind(tenant_id)
+    .bind(secret_id)
+    .bind(new_version)
+    .bind(&sealed.ciphertext)
+    .bind(&sealed.nonce)
+    .bind(&sealed.wrapped_dek)
+    .bind(&sealed.aad)
+    .bind(sealed.seal_provider.as_str())
+    .bind(&sealed.seal_key_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    sqlx::query(
+        r#"UPDATE "01_vault"."05_fct_secrets"
+           SET current_version = $1, updated_at = now()
+           WHERE id = $2"#,
+    )
+    .bind(new_version)
+    .bind(secret_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    if let Some((sink, ev)) = audit {
+        sink.record_in_tx(ev, tx)
+            .await
+            .map_err(|e| crate::Error::Audit(e.to_string()))?;
+    }
+
+    Ok(new_version)
+}
+
 // ── Config version ledger ─────────────────────────────────────────────────────
 
 /// Advance the version pointer for a config key and insert a new version row.
@@ -198,5 +291,68 @@ pub(super) async fn advance_config_version(
     .map_err(map_sqlx)?;
 
     tx.commit().await.map_err(map_sqlx)?;
+    Ok(new_version)
+}
+
+/// Advance the config version inside an *already-open* transaction.
+///
+/// The caller is responsible for setting `app.tenant_id` and owns the commit.
+/// If `audit` is `Some((sink, event))`, the audit row is written before returning.
+///
+/// Returns the new version number.
+pub(super) async fn advance_config_version_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    config_key_id: Uuid,
+    value: &str,
+    value_type: &str,
+    audit: Option<(&LocalSink, &AuditEvent)>,
+) -> Result<i32> {
+    let row: ConfigKeyRow = sqlx::query_as(
+        r#"SELECT id, current_version
+           FROM "01_vault"."07_fct_config_keys"
+           WHERE id = $1 AND tenant_id = $2 AND is_deleted = false
+           FOR UPDATE"#,
+    )
+    .bind(config_key_id)
+    .bind(tenant_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx)?
+    .ok_or(crate::Error::NotFound)?;
+
+    let new_version = row.current_version + 1;
+
+    sqlx::query(
+        r#"INSERT INTO "01_vault"."08_fct_config_versions"
+           (id, tenant_id, config_key_id, version, value, value_type, created_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, now())"#,
+    )
+    .bind(tenant_id)
+    .bind(config_key_id)
+    .bind(new_version)
+    .bind(value)
+    .bind(value_type)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    sqlx::query(
+        r#"UPDATE "01_vault"."07_fct_config_keys"
+           SET current_version = $1, updated_at = now()
+           WHERE id = $2"#,
+    )
+    .bind(new_version)
+    .bind(config_key_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+
+    if let Some((sink, ev)) = audit {
+        sink.record_in_tx(ev, tx)
+            .await
+            .map_err(|e| crate::Error::Audit(e.to_string()))?;
+    }
+
     Ok(new_version)
 }

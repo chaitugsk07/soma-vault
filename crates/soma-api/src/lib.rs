@@ -748,25 +748,27 @@ async fn put_secret(
     if let Err(r) = check_env_project(&*state.store, &principal.tenant, params.project_id, params.env_id).await {
         return r;
     }
+    let ctx = AuditCtx {
+        actor_id: principal.token_id,
+        actor_role: principal.role.to_string(),
+        event_type: "secret.write",
+        resource_type: "secret",
+        resource_id: params.path.clone(),
+    };
     match state
-        .store
-        .put_secret(
+        .pg_store
+        .put_secret_audited(
             &principal.tenant,
             params.env_id,
             &params.path,
             body.value.as_bytes(),
             body.attrs,
             body.cas,
+            &ctx,
         )
         .await
     {
-        Ok(meta) => {
-            let ev = make_audit_event(&principal, "secret.write", "secret", &params.path, None);
-            if let Err(e) = state.audit.record(&ev).await {
-                tracing::error!(err = %e, "audit record failed (best-effort)");
-            }
-            Json(meta).into_response()
-        }
+        Ok(meta) => Json(meta).into_response(),
         Err(e) => storage_err_to_response(e),
     }
 }
@@ -969,25 +971,27 @@ async fn put_config(
         Ok(vt) => vt,
         Err(e) => return storage_err_to_response(e),
     };
+    let ctx = AuditCtx {
+        actor_id: principal.token_id,
+        actor_role: principal.role.to_string(),
+        event_type: "config.write",
+        resource_type: "config",
+        resource_id: params.key.clone(),
+    };
     match state
-        .store
-        .put_config(
+        .pg_store
+        .put_config_audited(
             &principal.tenant,
             params.env_id,
             &params.key,
             &body.value,
             vt,
             body.attrs,
+            &ctx,
         )
         .await
     {
-        Ok(cv) => {
-            let ev = make_audit_event(&principal, "config.write", "config", &params.key, None);
-            if let Err(e) = state.audit.record(&ev).await {
-                tracing::error!(err = %e, "audit record failed (best-effort)");
-            }
-            Json(cv).into_response()
-        }
+        Ok(cv) => Json(cv).into_response(),
         Err(e) => storage_err_to_response(e),
     }
 }
@@ -1270,29 +1274,6 @@ fn make_denied_event(
     }
 }
 
-/// Build a `soma_audit_core::AuditEvent` from a `Principal` and operation details.
-fn make_audit_event(
-    principal: &Principal,
-    event_type: &str,
-    resource_type: &str,
-    resource_id: &str,
-    actor_ip: Option<std::net::IpAddr>,
-) -> AuditEvent {
-    AuditEvent {
-        source_service: "soma-vault".to_owned(),
-        idempotency_key: Uuid::new_v4(),
-        tenant_id: principal.tenant.as_uuid(),
-        event_type: event_type.to_owned(),
-        actor_id: Some(principal.token_id),
-        actor_role: Some(principal.role.to_string()),
-        resource_type: Some(resource_type.to_owned()),
-        resource_id: Some(resource_id.to_owned()),
-        outcome: Outcome::Success,
-        actor_ip,
-        occurred_at: chrono::Utc::now(),
-        metadata: serde_json::json!({}),
-    }
-}
 
 #[derive(Deserialize)]
 struct AuditQuery {
