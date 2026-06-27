@@ -26,6 +26,8 @@ services:
     environment:
       DATABASE_URL: postgres://soma:soma@postgres:5432/soma_vault
       SOMA_MASTER_KEK_HEX: "${SOMA_MASTER_KEK_HEX:?set SOMA_MASTER_KEK_HEX in deploy/.env (generate with: docker run --rm ghcr.io/chaitugsk07/soma-vault soma keygen)}"
+      SOMA_AUDIT_MASTER_SECRET: "${SOMA_AUDIT_MASTER_SECRET:?set SOMA_AUDIT_MASTER_SECRET in deploy/.env (64 hex chars)}"
+      SOMA_AUDIT_SIGNING_KEY: "${SOMA_AUDIT_SIGNING_KEY:?set SOMA_AUDIT_SIGNING_KEY in deploy/.env (64 hex chars)}"
       SOMA_COOKIE_SECURE: "false"
       SOMA_TOKEN_FILE: /tmp/soma-root-token
     depends_on:

@@ -6,10 +6,15 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use soma_api::{router, AppState};
+use soma_audit_pg::{AuditKeys, LocalSink};
 use soma_infra::TestDb;
 use soma_storage::{DataStore, PgDataStore, TenantId};
 use tower::ServiceExt;
 use soma_storage::Role;
+
+// Fixed test audit keys (32 bytes each, deterministic).
+const TEST_AUDIT_MASTER: [u8; 32] = [0xaa; 32];
+const TEST_AUDIT_SIGNING: [u8; 32] = [0xbb; 32];
 
 // ── Test DB helpers ───────────────────────────────────────────────────────────
 
@@ -26,7 +31,12 @@ async fn setup() -> (AppState, TestDb) {
     let store = PgDataStore::new(db.pool.clone(), kek);
     store.migrate().await.expect("migrate");
 
-    let state = AppState::new(Arc::new(store), false);
+    // Install soma-audit schema and build LocalSink for tests.
+    soma_audit_pg::install(&db.pool).await.expect("soma-audit install");
+    let audit_keys = Arc::new(AuditKeys::from_secret(TEST_AUDIT_MASTER, TEST_AUDIT_SIGNING));
+    let audit = Arc::new(LocalSink::new(db.pool.clone(), audit_keys, "soma-vault-test"));
+
+    let state = AppState::new(Arc::new(store), audit, false);
 
     (state, db)
 }

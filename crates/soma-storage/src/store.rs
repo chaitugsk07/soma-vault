@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::types::{
-    AttrDef, AuditEvent, AuditFilters, AuditVerifyResult, AuthToken, ConfigKey, ConfigVersion,
+    AttrDef, AuthToken, ConfigKey, ConfigVersion,
     EffectiveExportBundle, EntityRef, EntityType, Environment, ExportBundle, InheritedSecret,
     ListParams, Page, Project, ResolvedConfig, RevealedSecret, Secret, SecretVersionMeta, TenantId,
     ValueType,
@@ -305,20 +305,4 @@ pub trait DataStore: Send + Sync {
         resolve_refs: bool,
     ) -> Result<EffectiveExportBundle>;
 
-    // ── Audit log ─────────────────────────────────────────────────────────────
-
-    /// Record a single audit event. Computes `seq_num` and `entry_hash` atomically.
-    ///
-    /// Audit failures must NOT fail the caller's request — callers should log
-    /// and swallow errors from this method.
-    ///
-    /// ponytail: best-effort write-behind for v1. Stricter transactional mode
-    /// (where audit failure rolls back the operation) is the Phase-2 upgrade.
-    async fn record_audit(&self, event: AuditEvent) -> Result<()>;
-
-    /// List audit events for a tenant with optional filters (keyset by `seq_num` desc).
-    async fn list_audit(&self, tenant: &TenantId, filters: AuditFilters) -> Result<Page<AuditEvent>>;
-
-    /// Walk the audit chain for a tenant and verify every `entry_hash` and `prev_hash` link.
-    async fn verify_audit_chain(&self, tenant: &TenantId) -> Result<AuditVerifyResult>;
 }

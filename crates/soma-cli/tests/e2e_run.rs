@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use axum::serve;
 use soma_api::{router, AppState};
+use soma_audit_pg::{AuditKeys, LocalSink};
 use soma_infra::TestDb;
 use soma_crypto::MasterKek;
 use soma_storage::{DataStore, PgDataStore, TenantId};
@@ -75,7 +76,12 @@ async fn soma_run_injects_secret() {
     // tokio::net::TcpListener::from_std requires the socket to already be non-blocking.
     listener.set_nonblocking(true).expect("set_nonblocking");
 
-    let state = AppState::new(Arc::new(store), false);
+    // Install soma-audit schema and build LocalSink for the test server.
+    soma_audit_pg::install(&db.pool).await.expect("soma-audit install");
+    let audit_keys = Arc::new(AuditKeys::from_secret([0xaa; 32], [0xbb; 32]));
+    let audit = Arc::new(LocalSink::new(db.pool.clone(), audit_keys, "soma-vault-e2e"));
+
+    let state = AppState::new(Arc::new(store), audit, false);
 
     let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
     tokio::spawn(async move {

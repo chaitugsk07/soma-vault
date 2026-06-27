@@ -18,7 +18,9 @@ use axum_extra::extract::CookieJar;
 use http::header::{HeaderName, HeaderValue, AUTHORIZATION};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use soma_storage::{AuditEvent, AuditFilters, DataStore, Error, ListParams, Role, TenantId, ValueType};
+use soma_audit_core::{AuditEvent, Outcome};
+use soma_audit_pg::LocalSink;
+use soma_storage::{DataStore, Error, ListParams, Role, TenantId, ValueType};
 use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
@@ -113,6 +115,8 @@ where
 pub struct AppState {
     /// Storage backend.
     pub store: Arc<dyn DataStore>,
+    /// Audit sink — soma-audit LocalSink writing to vault's own Postgres.
+    pub audit: Arc<LocalSink>,
     /// Whether the session cookie should carry the `Secure` flag.
     pub cookie_secure: bool,
     /// Per-IP rate limiter for auth endpoints.
@@ -121,9 +125,10 @@ pub struct AppState {
 
 impl AppState {
     /// Construct application state with the default rate-limiter settings.
-    pub fn new(store: Arc<dyn DataStore>, cookie_secure: bool) -> Self {
+    pub fn new(store: Arc<dyn DataStore>, audit: Arc<LocalSink>, cookie_secure: bool) -> Self {
         Self {
             store,
+            audit,
             cookie_secure,
             auth_limiter: Arc::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW)),
         }
@@ -483,8 +488,8 @@ async fn create_token(
     match state.store.create_token(&principal.tenant, &body.name).await {
         Ok((meta, plaintext)) => {
             let ev = make_audit_event(&principal, "token.create", "token", &body.name, None);
-            if let Err(e) = state.store.record_audit(ev).await {
-                tracing::error!(err = %e, "audit record_audit failed (best-effort)");
+            if let Err(e) = state.audit.record(&ev).await {
+                tracing::error!(err = %e, "audit record failed (best-effort)");
             }
             (
                 StatusCode::CREATED,
@@ -518,8 +523,8 @@ async fn revoke_token(State(state): State<AppState>, principal: Principal, Path(
     match state.store.revoke_token(&principal.tenant, id).await {
         Ok(()) => {
             let ev = make_audit_event(&principal, "token.revoke", "token", &id.to_string(), None);
-            if let Err(e) = state.store.record_audit(ev).await {
-                tracing::error!(err = %e, "audit record_audit failed (best-effort)");
+            if let Err(e) = state.audit.record(&ev).await {
+                tracing::error!(err = %e, "audit record failed (best-effort)");
             }
             StatusCode::NO_CONTENT.into_response()
         }
@@ -571,8 +576,8 @@ async fn create_project(
     {
         Ok(project) => {
             let ev = make_audit_event(&principal, "project.create", "project", &body.code, None);
-            if let Err(e) = state.store.record_audit(ev).await {
-                tracing::error!(err = %e, "audit record_audit failed (best-effort)");
+            if let Err(e) = state.audit.record(&ev).await {
+                tracing::error!(err = %e, "audit record failed (best-effort)");
             }
             (StatusCode::CREATED, Json(project)).into_response()
         }
@@ -621,8 +626,8 @@ async fn create_environment(
     {
         Ok(env) => {
             let ev = make_audit_event(&principal, "environment.create", "environment", &body.code, None);
-            if let Err(e) = state.store.record_audit(ev).await {
-                tracing::error!(err = %e, "audit record_audit failed (best-effort)");
+            if let Err(e) = state.audit.record(&ev).await {
+                tracing::error!(err = %e, "audit record failed (best-effort)");
             }
             (StatusCode::CREATED, Json(env)).into_response()
         }
@@ -715,8 +720,8 @@ async fn put_secret(
     {
         Ok(meta) => {
             let ev = make_audit_event(&principal, "secret.write", "secret", &params.path, None);
-            if let Err(e) = state.store.record_audit(ev).await {
-                tracing::error!(err = %e, "audit record_audit failed (best-effort)");
+            if let Err(e) = state.audit.record(&ev).await {
+                tracing::error!(err = %e, "audit record failed (best-effort)");
             }
             Json(meta).into_response()
         }
@@ -754,8 +759,8 @@ async fn get_secret(
     {
         Ok(revealed) => {
             let ev = make_audit_event(&principal, "secret.read", "secret", &params.path, None);
-            if let Err(e) = state.store.record_audit(ev).await {
-                tracing::error!(err = %e, "audit record_audit failed (best-effort)");
+            if let Err(e) = state.audit.record(&ev).await {
+                tracing::error!(err = %e, "audit record failed (best-effort)");
             }
             let value = String::from_utf8_lossy(&revealed.plaintext).into_owned();
             let mut resp = Json(json!({
@@ -816,8 +821,8 @@ async fn rollback_secret(
     {
         Ok(secret) => {
             let ev = make_audit_event(&principal, "secret.rollback", "secret", &params.path, None);
-            if let Err(e) = state.store.record_audit(ev).await {
-                tracing::error!(err = %e, "audit record_audit failed (best-effort)");
+            if let Err(e) = state.audit.record(&ev).await {
+                tracing::error!(err = %e, "audit record failed (best-effort)");
             }
             Json(secret).into_response()
         }
@@ -843,8 +848,8 @@ async fn delete_secret(
     {
         Ok(()) => {
             let ev = make_audit_event(&principal, "secret.delete", "secret", &params.path, None);
-            if let Err(e) = state.store.record_audit(ev).await {
-                tracing::error!(err = %e, "audit record_audit failed (best-effort)");
+            if let Err(e) = state.audit.record(&ev).await {
+                tracing::error!(err = %e, "audit record failed (best-effort)");
             }
             StatusCode::NO_CONTENT.into_response()
         }
@@ -919,8 +924,8 @@ async fn put_config(
     {
         Ok(cv) => {
             let ev = make_audit_event(&principal, "config.write", "config", &params.key, None);
-            if let Err(e) = state.store.record_audit(ev).await {
-                tracing::error!(err = %e, "audit record_audit failed (best-effort)");
+            if let Err(e) = state.audit.record(&ev).await {
+                tracing::error!(err = %e, "audit record failed (best-effort)");
             }
             Json(cv).into_response()
         }
@@ -984,8 +989,8 @@ async fn rollback_config(
     {
         Ok(ck) => {
             let ev = make_audit_event(&principal, "config.rollback", "config", &params.key, None);
-            if let Err(e) = state.store.record_audit(ev).await {
-                tracing::error!(err = %e, "audit record_audit failed (best-effort)");
+            if let Err(e) = state.audit.record(&ev).await {
+                tracing::error!(err = %e, "audit record failed (best-effort)");
             }
             Json(ck).into_response()
         }
@@ -1011,8 +1016,8 @@ async fn delete_config(
     {
         Ok(()) => {
             let ev = make_audit_event(&principal, "config.delete", "config", &params.key, None);
-            if let Err(e) = state.store.record_audit(ev).await {
-                tracing::error!(err = %e, "audit record_audit failed (best-effort)");
+            if let Err(e) = state.audit.record(&ev).await {
+                tracing::error!(err = %e, "audit record failed (best-effort)");
             }
             StatusCode::NO_CONTENT.into_response()
         }
@@ -1161,7 +1166,7 @@ async fn delete_attr_def(
 
 // ── Audit log ─────────────────────────────────────────────────────────────────
 
-/// Build an `AuditEvent` from a `Principal` and operation details.
+/// Build a `soma_audit_core::AuditEvent` from a `Principal` and operation details.
 fn make_audit_event(
     principal: &Principal,
     event_type: &str,
@@ -1170,28 +1175,24 @@ fn make_audit_event(
     actor_ip: Option<std::net::IpAddr>,
 ) -> AuditEvent {
     AuditEvent {
-        id: Uuid::nil(), // replaced by DB gen_random_uuid()
+        source_service: "soma-vault".to_owned(),
+        idempotency_key: Uuid::new_v4(),
         tenant_id: principal.tenant.as_uuid(),
-        seq_num: 0, // replaced by record_audit
         event_type: event_type.to_owned(),
-        actor_token_id: Some(principal.token_id),
+        actor_id: Some(principal.token_id),
         actor_role: Some(principal.role.to_string()),
         resource_type: Some(resource_type.to_owned()),
         resource_id: Some(resource_id.to_owned()),
-        outcome: "success".to_owned(),
-        actor_ip: actor_ip.map(|ip| ip.to_string()),
-        prev_hash: None, // computed by record_audit
-        entry_hash: String::new(), // computed by record_audit
-        created_at: chrono::Utc::now(), // replaced by DB now()
+        outcome: Outcome::Success,
+        actor_ip,
+        occurred_at: chrono::Utc::now(),
+        metadata: serde_json::json!({}),
     }
 }
 
 #[derive(Deserialize)]
 struct AuditQuery {
     event_type: Option<String>,
-    from: Option<chrono::DateTime<chrono::Utc>>,
-    to: Option<chrono::DateTime<chrono::Utc>>,
-    actor: Option<Uuid>,
     limit: Option<i64>,
     cursor: Option<i64>,
 }
@@ -1204,17 +1205,21 @@ async fn list_audit_handler(
     if let Err(r) = principal.require(Role::Admin) {
         return r;
     }
-    let filters = AuditFilters {
-        event_type: q.event_type,
-        from: q.from,
-        to: q.to,
-        actor: q.actor,
-        limit: q.limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE),
-        cursor: q.cursor,
-    };
-    match state.store.list_audit(&principal.tenant, filters).await {
-        Ok(page) => Json(page).into_response(),
-        Err(e) => storage_err_to_response(e),
+    let limit = q.limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE);
+    match state.audit.list(
+        principal.tenant.as_uuid(),
+        q.event_type.as_deref(),
+        q.cursor,
+        limit,
+    ).await {
+        Ok((records, next_cursor)) => Json(json!({
+            "items": records,
+            "next_cursor": next_cursor,
+        })).into_response(),
+        Err(e) => {
+            tracing::error!(err = %e, "audit list failed");
+            internal_error()
+        }
     }
 }
 
@@ -1225,8 +1230,11 @@ async fn verify_audit_handler(
     if let Err(r) = principal.require(Role::Admin) {
         return r;
     }
-    match state.store.verify_audit_chain(&principal.tenant).await {
+    match state.audit.verify(principal.tenant.as_uuid()).await {
         Ok(result) => Json(result).into_response(),
-        Err(e) => storage_err_to_response(e),
+        Err(e) => {
+            tracing::error!(err = %e, "audit verify failed");
+            internal_error()
+        }
     }
 }

@@ -24,6 +24,7 @@ pub fn percent_encode(s: &str) -> String {
     out
 }
 
+use leptos_router::components::A;
 use leptos_router::hooks::{use_navigate, use_params_map};
 use serde::{Deserialize, Serialize};
 use soma_ui::{
@@ -57,8 +58,9 @@ pub fn EnvTabBar(pid: String, eid: String, active: &'static str) -> impl IntoVie
 
     view! {
         <div class="flex border-b border-border">
-            <a href=secrets_href class=tab_cls(active == "secrets")>"Secrets"</a>
-            <a href=config_href class=tab_cls(active == "config")>"Config"</a>
+            // <A> does client-side routing (no full page reload, unlike raw <a href>).
+            <A href=secrets_href attr:class=tab_cls(active == "secrets")>"Secrets"</A>
+            <A href=config_href attr:class=tab_cls(active == "config")>"Config"</A>
         </div>
     }
 }

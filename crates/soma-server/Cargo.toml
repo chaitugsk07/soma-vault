@@ -14,6 +14,7 @@ soma-api     = { path = "../soma-api" }
 soma-storage = { path = "../soma-storage" }
 soma-crypto  = { path = "../soma-crypto" }
 soma-infra   = { path = "../../../soma-infra", features = ["db", "tracing"] }
+soma-audit-pg = { path = "../../../soma-audit/crates/soma-audit-pg" }
 
 tokio       = { workspace = true }
 axum        = { workspace = true }

@@ -1,5 +1,4 @@
 mod attrs;
-mod audit;
 mod ledger;
 
 use std::collections::HashMap;
@@ -14,7 +13,7 @@ use soma_crypto::MasterKek;
 use crate::error::map_sqlx;
 use crate::store::DataStore;
 use crate::types::{
-    AttrDef, AuditEvent, AuditFilters, AuditVerifyResult, AuthToken, ConfigKey, ConfigVersion,
+    AttrDef, AuthToken, ConfigKey, ConfigVersion,
     EffectiveExportBundle, EntityRef, EntityType, Environment, ExportBundle, ExportEntry,
     InheritedSecret, ListParams, Page, Project, ResolvedConfig, RevealedSecret, Secret,
     SecretVersionMeta, TenantId, ValueType,
@@ -244,7 +243,6 @@ impl From<AttrDefRow> for AttrDef {
 pub struct PgDataStore {
     pub(crate) pool: PgPool,
     pub(crate) kek: MasterKek,
-    audit_hmac_key: [u8; 32],
 }
 
 impl PgDataStore {
@@ -253,8 +251,7 @@ impl PgDataStore {
     /// Call [`DataStore::migrate`] before issuing any other operations.
     #[must_use]
     pub fn new(pool: PgPool, kek: MasterKek) -> Self {
-        let audit_hmac_key = kek.derive_audit_hmac_key();
-        Self { pool, kek, audit_hmac_key }
+        Self { pool, kek }
     }
 
     /// Return a reference to the underlying pool (e.g. for tests).
@@ -1855,17 +1852,4 @@ impl DataStore for PgDataStore {
         Ok(EffectiveExportBundle { values, decrypt_errors })
     }
 
-    // ── Audit log ─────────────────────────────────────────────────────────────
-
-    async fn record_audit(&self, event: AuditEvent) -> Result<()> {
-        audit::record_audit(&self.pool, &self.audit_hmac_key, event).await
-    }
-
-    async fn list_audit(&self, tenant: &TenantId, filters: AuditFilters) -> Result<Page<AuditEvent>> {
-        audit::list_audit(&self.pool, tenant, filters).await
-    }
-
-    async fn verify_audit_chain(&self, tenant: &TenantId) -> Result<AuditVerifyResult> {
-        audit::verify_audit_chain(&self.pool, &self.audit_hmac_key, tenant).await
-    }
 }

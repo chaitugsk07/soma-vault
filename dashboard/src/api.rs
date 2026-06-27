@@ -256,7 +256,8 @@ pub struct AuditEvent {
     pub tenant_id: String,
     pub seq_num: i64,
     pub event_type: String,
-    pub actor_token_id: Option<String>,
+    /// Actor UUID (previously actor_token_id — renamed to match soma-audit-core AuditRecord).
+    pub actor_id: Option<String>,
     pub actor_role: Option<String>,
     pub resource_type: Option<String>,
     pub resource_id: Option<String>,
@@ -264,6 +265,7 @@ pub struct AuditEvent {
     pub actor_ip: Option<String>,
     pub prev_hash: Option<String>,
     pub entry_hash: String,
+    /// Wall-clock time the record was written to storage (from AuditRecord).
     pub created_at: String,
 }
 
