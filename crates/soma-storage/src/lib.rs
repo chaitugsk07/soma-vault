@@ -14,5 +14,5 @@ pub mod types;
 
 pub use error::{Error, Result};
 pub use pg::PgDataStore;
-pub use store::DataStore;
+pub use store::{AuditCtx, DataStore};
 pub use types::*;

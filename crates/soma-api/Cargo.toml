@@ -8,6 +8,8 @@ repository.workspace = true
 [dependencies]
 soma-storage = { path = "../soma-storage" }
 soma-crypto = { path = "../soma-crypto" }
+soma-audit-pg = { path = "../../../soma-audit/crates/soma-audit-pg" }
+soma-audit-core = { path = "../../../soma-audit/crates/soma-audit-core" }
 axum = { workspace = true }
 axum-extra = { version = "0.10", features = ["cookie"] }
 tower = { workspace = true }
@@ -22,6 +24,7 @@ http = "1"
 [dev-dependencies]
 tokio = { workspace = true }
 soma-infra = { path = "../../../soma-infra", features = ["testing"] }
+soma-audit-pg = { path = "../../../soma-audit/crates/soma-audit-pg" }
 tower = { workspace = true, features = ["util"] }
 sha2 = { workspace = true }
 hex = "0.4"

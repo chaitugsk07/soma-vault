@@ -59,6 +59,16 @@ spec:
                 secretKeyRef:
                   name: {{ include "soma-vault.secretName" . }}
                   key: SOMA_MASTER_KEK_HEX
+            - name: SOMA_AUDIT_MASTER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "soma-vault.secretName" . }}
+                  key: SOMA_AUDIT_MASTER_SECRET
+            - name: SOMA_AUDIT_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "soma-vault.secretName" . }}
+                  key: SOMA_AUDIT_SIGNING_KEY
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

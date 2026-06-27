@@ -35,6 +35,10 @@ pub enum Error {
     /// Migration error.
     #[error("migration error: {0}")]
     Migrate(String),
+
+    /// Audit sink error.
+    #[error("audit error: {0}")]
+    Audit(String),
 }
 
 /// Convenience alias.

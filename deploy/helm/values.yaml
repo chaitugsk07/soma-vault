@@ -55,6 +55,11 @@ secret:
   # 64-character hex master key.  Generate with: soma keygen
   # IMPORTANT: never commit a real KEK to version control.
   masterKekHex: ""
+  # 64-character hex audit keys (HMAC chain signing).
+  # Generate each with: openssl rand -hex 32
+  # IMPORTANT: never commit real audit keys to version control.
+  auditMasterSecret: ""
+  auditSigningKey: ""
 
 # -- Extra environment variables added to the container.
 # Example:

@@ -6,10 +6,15 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use soma_api::{router, AppState};
+use soma_audit_pg::{AuditKeys, LocalSink};
 use soma_infra::TestDb;
 use soma_storage::{DataStore, PgDataStore, TenantId};
 use tower::ServiceExt;
 use soma_storage::Role;
+
+// Fixed test audit keys (32 bytes each, deterministic).
+const TEST_AUDIT_MASTER: [u8; 32] = [0xaa; 32];
+const TEST_AUDIT_SIGNING: [u8; 32] = [0xbb; 32];
 
 // ── Test DB helpers ───────────────────────────────────────────────────────────
 
@@ -26,7 +31,14 @@ async fn setup() -> (AppState, TestDb) {
     let store = PgDataStore::new(db.pool.clone(), kek);
     store.migrate().await.expect("migrate");
 
-    let state = AppState::new(Arc::new(store), false);
+    // Install soma-audit schema and build LocalSink for tests.
+    soma_audit_pg::install(&db.pool).await.expect("soma-audit install");
+    let audit_keys = Arc::new(AuditKeys::from_secret(TEST_AUDIT_MASTER, TEST_AUDIT_SIGNING));
+    let audit = Arc::new(LocalSink::new(db.pool.clone(), audit_keys, "soma-vault-test"));
+
+    // Wire audit into the store for atomic audit recording.
+    let store = Arc::new(store.into_with_audit(audit.clone()));
+    let state = AppState::new(store, audit, false);
 
     (state, db)
 }
@@ -695,4 +707,298 @@ async fn test_audit_rbac() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN, "reader should get 403 on audit");
+}
+
+// ── Test 9: Atomic audit — project.create appears in audit list ──────────────
+
+#[tokio::test]
+async fn test_atomic_audit() {
+    let (state, _guard) = setup().await;
+
+    let (_, token) = state
+        .store
+        .create_token(&TenantId::default(), "atomic-audit-admin")
+        .await
+        .unwrap();
+
+    // Create a project via the HTTP API.
+    let resp = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/projects")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({"code":"atomic-proj","name":"Atomic"})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Audit list should have at least one entry with event_type "project.create".
+    let resp = router(state.clone())
+        .oneshot(authed_request("GET", "/v1/audit", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = body_json(resp).await;
+    let items = body["items"].as_array().expect("items array");
+    let has_create = items.iter().any(|i| i["event_type"].as_str() == Some("project.create"));
+    assert!(has_create, "should have a project.create audit entry");
+
+    // Verify chain is intact.
+    let resp = router(state.clone())
+        .oneshot(authed_request("GET", "/v1/audit/verify", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let verify: serde_json::Value = body_json(resp).await;
+    assert_eq!(verify["ok"].as_bool(), Some(true), "chain should be intact");
+    assert!(verify["entries_checked"].as_u64().unwrap_or(0) > 0, "entries_checked must be > 0");
+}
+
+// ── Test 10: Denial audit — unauthorized create_token shows outcome=denied ───
+
+#[tokio::test]
+async fn test_denial_audit() {
+    let (state, db) = setup().await;
+
+    let (_, admin_token) = state
+        .store
+        .create_token(&TenantId::default(), "denial-admin")
+        .await
+        .unwrap();
+
+    // Insert a reader token.
+    use sha2::{Digest, Sha256};
+    let reader_plaintext = "denial-reader-token-hex32bytes00";
+    let reader_hash = hex::encode(Sha256::digest(reader_plaintext.as_bytes()));
+    sqlx::query(
+        r#"INSERT INTO "01_vault"."11_fct_auth_tokens"
+           (id, tenant_id, name, token_hash, role, is_revoked, created_at)
+           VALUES (gen_random_uuid(), $1, 'denial-reader', $2, 'reader', false, now())"#,
+    )
+    .bind(TenantId::default().0)
+    .bind(&reader_hash)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    // Reader tries POST /v1/auth/tokens → 403 (requires Admin).
+    let resp = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/tokens")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {reader_plaintext}"))
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({"name": "reader-probe"})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Admin checks audit list — should contain an entry with outcome "denied".
+    let resp = router(state.clone())
+        .oneshot(authed_request("GET", "/v1/audit", &admin_token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = body_json(resp).await;
+    let items = body["items"].as_array().expect("items array");
+    let has_denied = items.iter().any(|i| i["outcome"].as_str() == Some("denied"));
+    assert!(has_denied, "should have a denied audit entry after 403");
+}
+
+// ── Test 11: put_secret atomic audit ─────────────────────────────────────────
+
+#[tokio::test]
+async fn test_put_secret_atomic_audit() {
+    let (state, _guard) = setup().await;
+
+    let (_, token) = state
+        .store
+        .create_token(&TenantId::default(), "put-secret-audit-admin")
+        .await
+        .unwrap();
+
+    // Create project + env so we have a valid target for PUT secret.
+    let proj = state
+        .store
+        .create_project(&TenantId::default(), "ps-audit-proj", "PS Audit", None)
+        .await
+        .unwrap();
+    let env = state
+        .store
+        .create_environment(&TenantId::default(), proj.id, "ps-env", "PS Env", None)
+        .await
+        .unwrap();
+
+    // PUT secret via the HTTP API — uses put_secret_audited path.
+    let secret_uri = format!(
+        "/v1/projects/{}/environments/{}/secrets/ps-audit-key",
+        proj.id, env.id
+    );
+    let resp = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&secret_uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({"value": "atomic-secret-value"})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "PUT secret should succeed");
+
+    // Audit list should contain exactly one "secret.write" entry for this path.
+    let resp = router(state.clone())
+        .oneshot(authed_request("GET", "/v1/audit", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = body_json(resp).await;
+    let items = body["items"].as_array().expect("items array");
+
+    let write_entries: Vec<_> = items
+        .iter()
+        .filter(|i| {
+            i["event_type"].as_str() == Some("secret.write")
+                && i["resource_id"].as_str() == Some("ps-audit-key")
+        })
+        .collect();
+
+    assert_eq!(
+        write_entries.len(),
+        1,
+        "should have exactly one secret.write audit entry for ps-audit-key"
+    );
+    assert_eq!(
+        write_entries[0]["outcome"].as_str(),
+        Some("success"),
+        "audit outcome should be success"
+    );
+    assert_eq!(
+        write_entries[0]["resource_type"].as_str(),
+        Some("secret"),
+        "resource_type should be secret"
+    );
+
+    // Verify chain is intact (proves the audit row is in the chain, not orphaned).
+    let resp = router(state.clone())
+        .oneshot(authed_request("GET", "/v1/audit/verify", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let verify: serde_json::Value = body_json(resp).await;
+    assert_eq!(verify["ok"].as_bool(), Some(true), "chain should be intact after secret write");
+    assert!(
+        verify["entries_checked"].as_u64().unwrap_or(0) > 0,
+        "entries_checked must be > 0"
+    );
+}
+
+// ── Test 12: put_config atomic audit ─────────────────────────────────────────
+
+#[tokio::test]
+async fn test_put_config_atomic_audit() {
+    let (state, _guard) = setup().await;
+
+    let (_, token) = state
+        .store
+        .create_token(&TenantId::default(), "put-config-audit-admin")
+        .await
+        .unwrap();
+
+    // Create project + env so we have a valid target for PUT config.
+    let proj = state
+        .store
+        .create_project(&TenantId::default(), "pc-audit-proj", "PC Audit", None)
+        .await
+        .unwrap();
+    let env = state
+        .store
+        .create_environment(&TenantId::default(), proj.id, "pc-env", "PC Env", None)
+        .await
+        .unwrap();
+
+    // PUT config via the HTTP API — uses put_config_audited path.
+    let config_uri = format!(
+        "/v1/projects/{}/environments/{}/config/pc-audit-key",
+        proj.id, env.id
+    );
+    let resp = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&config_uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::to_vec(
+                        &serde_json::json!({"value": "atomic-config-value", "type": "string"}),
+                    )
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "PUT config should succeed");
+
+    // Audit list should contain exactly one "config.write" entry for this key.
+    let resp = router(state.clone())
+        .oneshot(authed_request("GET", "/v1/audit", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = body_json(resp).await;
+    let items = body["items"].as_array().expect("items array");
+
+    let write_entries: Vec<_> = items
+        .iter()
+        .filter(|i| {
+            i["event_type"].as_str() == Some("config.write")
+                && i["resource_id"].as_str() == Some("pc-audit-key")
+        })
+        .collect();
+
+    assert_eq!(
+        write_entries.len(),
+        1,
+        "should have exactly one config.write audit entry for pc-audit-key"
+    );
+    assert_eq!(
+        write_entries[0]["outcome"].as_str(),
+        Some("success"),
+        "audit outcome should be success"
+    );
+    assert_eq!(
+        write_entries[0]["resource_type"].as_str(),
+        Some("config"),
+        "resource_type should be config"
+    );
+
+    // Verify chain is intact.
+    let resp = router(state.clone())
+        .oneshot(authed_request("GET", "/v1/audit/verify", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let verify: serde_json::Value = body_json(resp).await;
+    assert_eq!(verify["ok"].as_bool(), Some(true), "chain should be intact after config write");
+    assert!(
+        verify["entries_checked"].as_u64().unwrap_or(0) > 0,
+        "entries_checked must be > 0"
+    );
 }

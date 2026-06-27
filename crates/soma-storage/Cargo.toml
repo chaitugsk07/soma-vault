@@ -7,6 +7,8 @@ repository.workspace = true
 
 [dependencies]
 soma-crypto = { path = "../soma-crypto" }
+soma-audit-core = { path = "../../../soma-audit/crates/soma-audit-core" }
+soma-audit-pg = { path = "../../../soma-audit/crates/soma-audit-pg" }
 soma-schema = { workspace = true }
 sqlx = { workspace = true }
 serde = { workspace = true }

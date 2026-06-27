@@ -26,6 +26,7 @@ soma-infra = { path = "../../../soma-infra", features = ["db", "tracing"] }
 [dev-dependencies]
 soma-api = { path = "../soma-api" }
 soma-storage = { path = "../soma-storage" }
+soma-audit-pg = { path = "../../../soma-audit/crates/soma-audit-pg" }
 soma-infra = { path = "../../../soma-infra", features = ["testing"] }
 axum = { workspace = true }
 uuid = { workspace = true }

@@ -291,7 +291,7 @@ pub fn AuditPage() -> impl IntoView {
                                     children=move |ev| {
                                         let ts = ev.created_at.clone();
                                         let rel = relative_time(&ts);
-                                        let actor_display = match (&ev.actor_token_id, &ev.actor_role) {
+                                        let actor_display = match (&ev.actor_id, &ev.actor_role) {
                                             (Some(id), Some(role)) => format!("{} ({})", short_id(id), role),
                                             (Some(id), None) => short_id(id),
                                             _ => "—".to_string(),
