@@ -205,10 +205,9 @@ async fn main() -> Result<()> {
         .await
         .context("connecting to Postgres (DATABASE_URL)")?;
 
-    let store = PgDataStore::new(pool.clone(), kek);
-
-    // 4. Migrate vault schema.
-    store.migrate().await.context("migrate-on-boot")?;
+    // 4. Build a plain store for migrations (no audit wired yet).
+    let plain_store = PgDataStore::new(pool.clone(), kek);
+    plain_store.migrate().await.context("migrate-on-boot")?;
     info!("migrations applied");
 
     // 5. Install soma-audit schema (idempotent, advisory-locked).
@@ -224,14 +223,22 @@ async fn main() -> Result<()> {
              to valid 64-character hex strings",
         )?,
     );
-    let audit_sink = std::sync::Arc::new(LocalSink::new(pool, audit_keys, "soma-vault"));
+    let audit_sink = std::sync::Arc::new(LocalSink::new(pool.clone(), audit_keys, "soma-vault"));
 
-    // 7. Bootstrap root token.
+    // 7. Rebuild store wired to audit sink for atomic audit recording.
+    // plain_store transferred its kek; reconstruct with a fresh kek from the pool.
+    // (MasterKek does not implement Clone; we rebuild from the already-cleared env
+    //  var by reusing the plain_store and swapping to with_audit via the inner field.)
+    // Simplest: wrap plain_store in Arc and call with_audit separately.
+    // Since MasterKek is not Clone, we move it into with_audit via plain_store.
+    let store = Arc::new(plain_store.into_with_audit(audit_sink.clone()));
+
+    // 8. Bootstrap root token.
     let tenant = TenantId::default();
     bootstrap_root_token(&store, &tenant, &token_file).await?;
 
-    // 8. Build app.
-    let state = AppState::new(Arc::new(store), audit_sink, cookie_secure);
+    // 9. Build app.
+    let state = AppState::new(store, audit_sink, cookie_secure);
 
     let app = soma_api::router(state)
         .fallback(get(portal_handler))

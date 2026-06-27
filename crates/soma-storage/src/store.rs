@@ -3,6 +3,20 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use uuid::Uuid;
 
+/// Caller-supplied context for atomic audit recording inside a business transaction.
+pub struct AuditCtx {
+    /// Identity of the actor that initiated the operation.
+    pub actor_id: Uuid,
+    /// Role of the actor (e.g. "admin", "developer").
+    pub actor_role: String,
+    /// Audit event type string (e.g. "project.create").
+    pub event_type: &'static str,
+    /// Resource category (e.g. "project", "secret").
+    pub resource_type: &'static str,
+    /// Identifier for the specific resource (e.g. project code, secret path).
+    pub resource_id: String,
+}
+
 use crate::types::{
     AttrDef, AuthToken, ConfigKey, ConfigVersion,
     EffectiveExportBundle, EntityRef, EntityType, Environment, ExportBundle, InheritedSecret,

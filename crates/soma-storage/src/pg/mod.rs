@@ -2,16 +2,19 @@ mod attrs;
 mod ledger;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use soma_audit_core::{AuditEvent, Outcome};
+use soma_audit_pg::LocalSink;
 use soma_crypto::MasterKek;
 
 use crate::error::map_sqlx;
-use crate::store::DataStore;
+use crate::store::{AuditCtx, DataStore};
 use crate::types::{
     AttrDef, AuthToken, ConfigKey, ConfigVersion,
     EffectiveExportBundle, EntityRef, EntityType, Environment, ExportBundle, ExportEntry,
@@ -243,6 +246,7 @@ impl From<AttrDefRow> for AttrDef {
 pub struct PgDataStore {
     pub(crate) pool: PgPool,
     pub(crate) kek: MasterKek,
+    audit: Option<Arc<LocalSink>>,
 }
 
 impl PgDataStore {
@@ -251,13 +255,61 @@ impl PgDataStore {
     /// Call [`DataStore::migrate`] before issuing any other operations.
     #[must_use]
     pub fn new(pool: PgPool, kek: MasterKek) -> Self {
-        Self { pool, kek }
+        Self { pool, kek, audit: None }
+    }
+
+    /// Create a new store wired to an audit sink for atomic audit recording.
+    ///
+    /// Audit rows are written inside the same transaction as business writes.
+    #[must_use]
+    pub fn with_audit(pool: PgPool, kek: MasterKek, audit: Arc<LocalSink>) -> Self {
+        Self { pool, kek, audit: Some(audit) }
     }
 
     /// Return a reference to the underlying pool (e.g. for tests).
     #[must_use]
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Consume this store and return a new one wired to the given audit sink.
+    ///
+    /// Useful when [`MasterKek`] cannot be cloned (e.g. at server startup after migrations).
+    #[must_use]
+    pub fn into_with_audit(self, audit: Arc<LocalSink>) -> Self {
+        Self {
+            pool: self.pool,
+            kek: self.kek,
+            audit: Some(audit),
+        }
+    }
+
+    /// Write an audit row inside an existing transaction; no-op when no sink is configured.
+    async fn record_audit_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        tenant: &crate::types::TenantId,
+        ctx: &AuditCtx,
+    ) -> crate::Result<()> {
+        let Some(sink) = &self.audit else { return Ok(()); };
+        let ev = AuditEvent {
+            source_service: String::new(), // sink fills this in
+            idempotency_key: Uuid::new_v4(),
+            tenant_id: tenant.0,
+            event_type: ctx.event_type.to_owned(),
+            actor_id: Some(ctx.actor_id),
+            actor_role: Some(ctx.actor_role.clone()),
+            resource_type: Some(ctx.resource_type.to_owned()),
+            resource_id: Some(ctx.resource_id.clone()),
+            outcome: Outcome::Success,
+            actor_ip: None,
+            occurred_at: chrono::Utc::now(),
+            metadata: serde_json::json!({}),
+        };
+        sink.record_in_tx(&ev, tx)
+            .await
+            .map_err(|e| crate::Error::Audit(e.to_string()))?;
+        Ok(())
     }
 
     /// Begin a transaction and immediately set `app.tenant_id` so that all
@@ -278,6 +330,451 @@ impl PgDataStore {
             .await
             .map_err(map_sqlx)?;
         Ok(tx)
+    }
+}
+
+// ── Atomic-audit convenience methods (not on the trait) ───────────────────────
+
+impl PgDataStore {
+    /// Create a new auth token and record an audit event in the same transaction.
+    ///
+    /// # Errors
+    /// Returns [`Error`] on database failure or audit sink failure.
+    pub async fn create_token_audited(
+        &self,
+        tenant: &crate::types::TenantId,
+        name: &str,
+        ctx: &AuditCtx,
+    ) -> crate::Result<(crate::types::AuthToken, String)> {
+        use rand::RngCore;
+        let mut raw = vec![0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut raw);
+        let token_str = hex::encode(&raw);
+        let hash = hex::encode(Sha256::digest(token_str.as_bytes()));
+
+        let mut tx = self.tenant_tx(tenant).await?;
+
+        let row: AuthTokenRow = sqlx::query_as(
+            r#"INSERT INTO "01_vault"."11_fct_auth_tokens"
+               (id, tenant_id, name, token_hash, is_revoked, created_at)
+               VALUES (gen_random_uuid(), $1, $2, $3, false, now())
+               RETURNING id, tenant_id, name, role, created_at, last_used_at"#,
+        )
+        .bind(tenant.0)
+        .bind(name)
+        .bind(&hash)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        self.record_audit_in_tx(&mut tx, tenant, ctx).await?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok((row.into(), token_str))
+    }
+
+    /// Revoke a token and record an audit event in the same transaction.
+    ///
+    /// # Errors
+    /// Returns [`Error::NotFound`] if the token does not exist. Returns [`Error`] on other failures.
+    pub async fn revoke_token_audited(
+        &self,
+        tenant: &crate::types::TenantId,
+        token_id: Uuid,
+        ctx: &AuditCtx,
+    ) -> crate::Result<()> {
+        let mut tx = self.tenant_tx(tenant).await?;
+
+        let affected = sqlx::query(
+            r#"UPDATE "01_vault"."11_fct_auth_tokens"
+               SET is_revoked = true
+               WHERE id = $1 AND tenant_id = $2 AND is_revoked = false"#,
+        )
+        .bind(token_id)
+        .bind(tenant.0)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(crate::Error::NotFound);
+        }
+
+        self.record_audit_in_tx(&mut tx, tenant, ctx).await?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    /// Create a project and record an audit event in the same transaction.
+    ///
+    /// # Errors
+    /// Returns [`Error`] on database failure, conflict, or audit sink failure.
+    pub async fn create_project_audited(
+        &self,
+        tenant: &crate::types::TenantId,
+        code: &str,
+        name: &str,
+        description: Option<&str>,
+        ctx: &AuditCtx,
+    ) -> crate::Result<crate::types::Project> {
+        let mut tx = self.tenant_tx(tenant).await?;
+
+        let row: ProjectRow = sqlx::query_as(
+            r#"INSERT INTO "01_vault"."03_fct_projects"
+               (id, tenant_id, code, name, description, is_deleted, created_at, updated_at)
+               VALUES (gen_random_uuid(), $1, $2, $3, $4, false, now(), now())
+               RETURNING id, tenant_id, code, name, description, created_at, updated_at"#,
+        )
+        .bind(tenant.0)
+        .bind(code)
+        .bind(name)
+        .bind(description)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        self.record_audit_in_tx(&mut tx, tenant, ctx).await?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(row.into())
+    }
+
+    /// Create an environment and record an audit event in the same transaction.
+    ///
+    /// # Errors
+    /// Returns [`Error::NotFound`] if the project does not exist. Returns [`Error`] on other failures.
+    pub async fn create_environment_audited(
+        &self,
+        tenant: &crate::types::TenantId,
+        project_id: Uuid,
+        code: &str,
+        name: &str,
+        parent_env_id: Option<Uuid>,
+        ctx: &AuditCtx,
+    ) -> crate::Result<crate::types::Environment> {
+        let mut tx = self.tenant_tx(tenant).await?;
+
+        let proj_ok: bool = sqlx::query(
+            r#"SELECT 1 FROM "01_vault"."03_fct_projects"
+               WHERE id = $1 AND tenant_id = $2 AND is_deleted = false"#,
+        )
+        .bind(project_id)
+        .bind(tenant.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .is_some();
+
+        if !proj_ok {
+            return Err(crate::Error::NotFound);
+        }
+
+        if let Some(parent_id) = parent_env_id {
+            let parent_row: Option<(Uuid,)> = sqlx::query_as(
+                r#"SELECT project_id FROM "01_vault"."04_fct_environments"
+                   WHERE id = $1 AND tenant_id = $2 AND is_deleted = false"#,
+            )
+            .bind(parent_id)
+            .bind(tenant.0)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
+
+            match parent_row {
+                None => return Err(crate::Error::NotFound),
+                Some((parent_project_id,)) if parent_project_id != project_id => {
+                    return Err(crate::Error::Validation(
+                        "parent_env_id must belong to the same project".to_owned(),
+                    ));
+                }
+                _ => {}
+            }
+
+            let depth = check_env_chain_depth(&mut tx, tenant.0, parent_id).await?;
+            if depth >= 5 {
+                return Err(crate::Error::Validation(
+                    "environment inheritance chain would exceed maximum depth of 5".to_owned(),
+                ));
+            }
+        }
+
+        let row: EnvironmentRow = sqlx::query_as(
+            r#"INSERT INTO "01_vault"."04_fct_environments"
+               (id, tenant_id, project_id, code, name, parent_env_id, is_deleted, created_at, updated_at)
+               VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, false, now(), now())
+               RETURNING id, tenant_id, project_id, code, name, parent_env_id, created_at, updated_at"#,
+        )
+        .bind(tenant.0)
+        .bind(project_id)
+        .bind(code)
+        .bind(name)
+        .bind(parent_env_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        self.record_audit_in_tx(&mut tx, tenant, ctx).await?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(row.into())
+    }
+
+    /// Decrypt and return a secret, recording an audit event in the same transaction.
+    ///
+    /// # Errors
+    /// Returns [`Error::NotFound`] if the secret does not exist. Returns [`Error`] on crypto or DB failure.
+    pub async fn get_secret_audited(
+        &self,
+        tenant: &crate::types::TenantId,
+        env_id: Uuid,
+        path: &str,
+        version: Option<i32>,
+        ctx: &AuditCtx,
+    ) -> crate::Result<crate::types::RevealedSecret> {
+        let mut tx = self.tenant_tx(tenant).await?;
+
+        let secret: SecretRow = sqlx::query_as(
+            r#"SELECT id, tenant_id, environment_id, path, current_version, cas_required,
+                      max_versions, created_at, updated_at
+               FROM "01_vault"."05_fct_secrets"
+               WHERE tenant_id = $1 AND environment_id = $2 AND path = $3 AND is_deleted = false"#,
+        )
+        .bind(tenant.0)
+        .bind(env_id)
+        .bind(path)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .ok_or(crate::Error::NotFound)?;
+
+        let target_version = version.unwrap_or(secret.current_version);
+
+        let ver_row: SecretVersionRow = sqlx::query_as(
+            r#"SELECT secret_id, version, ciphertext, nonce, wrapped_dek, aad,
+                      seal_provider, seal_key_id, created_at
+               FROM "01_vault"."06_fct_secret_versions"
+               WHERE secret_id = $1 AND version = $2"#,
+        )
+        .bind(secret.id)
+        .bind(target_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .ok_or(crate::Error::NotFound)?;
+
+        self.record_audit_in_tx(&mut tx, tenant, ctx).await?;
+        tx.commit().await.map_err(map_sqlx)?;
+
+        let sealed = soma_crypto::Sealed {
+            ciphertext: ver_row.ciphertext,
+            nonce: ver_row.nonce,
+            wrapped_dek: ver_row.wrapped_dek,
+            aad: ver_row.aad,
+            seal_provider: ver_row.seal_provider.parse().map_err(crate::Error::Crypto)?,
+            seal_key_id: ver_row.seal_key_id,
+        };
+
+        let tenant_kek = self.kek.derive_tenant_kek(tenant.0);
+        let plaintext =
+            soma_crypto::decrypt_checked(&tenant_kek, &sealed, secret.id, i64::from(target_version))?;
+
+        Ok(crate::types::RevealedSecret {
+            meta: secret.into(),
+            version: target_version,
+            plaintext,
+        })
+    }
+
+    /// Roll back a secret to a previous version, recording an audit event in the same transaction.
+    ///
+    /// # Errors
+    /// Returns [`Error::NotFound`] if the secret or target version does not exist.
+    pub async fn rollback_secret_audited(
+        &self,
+        tenant: &crate::types::TenantId,
+        env_id: Uuid,
+        path: &str,
+        to_version: i32,
+        ctx: &AuditCtx,
+    ) -> crate::Result<crate::types::Secret> {
+        let mut tx = self.tenant_tx(tenant).await?;
+
+        let secret: SecretRow = sqlx::query_as(
+            r#"SELECT id, tenant_id, environment_id, path, current_version, cas_required,
+                      max_versions, created_at, updated_at
+               FROM "01_vault"."05_fct_secrets"
+               WHERE tenant_id = $1 AND environment_id = $2 AND path = $3 AND is_deleted = false
+               FOR UPDATE"#,
+        )
+        .bind(tenant.0)
+        .bind(env_id)
+        .bind(path)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .ok_or(crate::Error::NotFound)?;
+
+        let exists: bool = sqlx::query(
+            r#"SELECT 1 FROM "01_vault"."06_fct_secret_versions"
+               WHERE secret_id = $1 AND version = $2"#,
+        )
+        .bind(secret.id)
+        .bind(to_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .is_some();
+
+        if !exists {
+            return Err(crate::Error::NotFound);
+        }
+
+        let updated: SecretRow = sqlx::query_as(
+            r#"UPDATE "01_vault"."05_fct_secrets"
+               SET current_version = $1, updated_at = now()
+               WHERE id = $2
+               RETURNING id, tenant_id, environment_id, path, current_version, cas_required,
+                         max_versions, created_at, updated_at"#,
+        )
+        .bind(to_version)
+        .bind(secret.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        self.record_audit_in_tx(&mut tx, tenant, ctx).await?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(updated.into())
+    }
+
+    /// Soft-delete a secret and record an audit event in the same transaction.
+    ///
+    /// # Errors
+    /// Returns [`Error::NotFound`] if the secret does not exist. Returns [`Error`] on other failures.
+    pub async fn delete_secret_audited(
+        &self,
+        tenant: &crate::types::TenantId,
+        env_id: Uuid,
+        path: &str,
+        ctx: &AuditCtx,
+    ) -> crate::Result<()> {
+        let mut tx = self.tenant_tx(tenant).await?;
+
+        let affected = sqlx::query(
+            r#"UPDATE "01_vault"."05_fct_secrets"
+               SET is_deleted = true, deleted_at = now(), updated_at = now()
+               WHERE tenant_id = $1 AND environment_id = $2 AND path = $3 AND is_deleted = false"#,
+        )
+        .bind(tenant.0)
+        .bind(env_id)
+        .bind(path)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(crate::Error::NotFound);
+        }
+
+        self.record_audit_in_tx(&mut tx, tenant, ctx).await?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    /// Roll back a config key to a previous version, recording an audit event in the same transaction.
+    ///
+    /// # Errors
+    /// Returns [`Error::NotFound`] if the config key or target version does not exist.
+    pub async fn rollback_config_audited(
+        &self,
+        tenant: &crate::types::TenantId,
+        env_id: Uuid,
+        key: &str,
+        to_version: i32,
+        ctx: &AuditCtx,
+    ) -> crate::Result<crate::types::ConfigKey> {
+        let mut tx = self.tenant_tx(tenant).await?;
+
+        let ck: ConfigKeyRow = sqlx::query_as(
+            r#"SELECT id, tenant_id, environment_id, key, value_type,
+                      current_version, created_at, updated_at
+               FROM "01_vault"."07_fct_config_keys"
+               WHERE tenant_id = $1 AND environment_id = $2 AND key = $3 AND is_deleted = false
+               FOR UPDATE"#,
+        )
+        .bind(tenant.0)
+        .bind(env_id)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .ok_or(crate::Error::NotFound)?;
+
+        let exists: bool = sqlx::query(
+            r#"SELECT 1 FROM "01_vault"."08_fct_config_versions"
+               WHERE config_key_id = $1 AND version = $2"#,
+        )
+        .bind(ck.id)
+        .bind(to_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .is_some();
+
+        if !exists {
+            return Err(crate::Error::NotFound);
+        }
+
+        let updated: ConfigKeyRow = sqlx::query_as(
+            r#"UPDATE "01_vault"."07_fct_config_keys"
+               SET current_version = $1, updated_at = now()
+               WHERE id = $2
+               RETURNING id, tenant_id, environment_id, key, value_type,
+                         current_version, created_at, updated_at"#,
+        )
+        .bind(to_version)
+        .bind(ck.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        self.record_audit_in_tx(&mut tx, tenant, ctx).await?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(updated.into())
+    }
+
+    /// Soft-delete a config key and record an audit event in the same transaction.
+    ///
+    /// # Errors
+    /// Returns [`Error::NotFound`] if the config key does not exist. Returns [`Error`] on other failures.
+    pub async fn delete_config_audited(
+        &self,
+        tenant: &crate::types::TenantId,
+        env_id: Uuid,
+        key: &str,
+        ctx: &AuditCtx,
+    ) -> crate::Result<()> {
+        let mut tx = self.tenant_tx(tenant).await?;
+
+        let affected = sqlx::query(
+            r#"UPDATE "01_vault"."07_fct_config_keys"
+               SET is_deleted = true, deleted_at = now(), updated_at = now()
+               WHERE tenant_id = $1 AND environment_id = $2 AND key = $3 AND is_deleted = false"#,
+        )
+        .bind(tenant.0)
+        .bind(env_id)
+        .bind(key)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(crate::Error::NotFound);
+        }
+
+        self.record_audit_in_tx(&mut tx, tenant, ctx).await?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(())
     }
 }
 

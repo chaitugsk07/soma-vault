@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use soma_audit_core::{AuditEvent, Outcome};
 use soma_audit_pg::LocalSink;
-use soma_storage::{DataStore, Error, ListParams, Role, TenantId, ValueType};
+use soma_storage::{AuditCtx, DataStore, Error, ListParams, PgDataStore, Role, TenantId, ValueType};
 use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
@@ -113,8 +113,10 @@ where
 /// Shared application state threaded through all handlers.
 #[derive(Clone)]
 pub struct AppState {
-    /// Storage backend.
+    /// Storage backend (trait object — used for all trait-method calls).
     pub store: Arc<dyn DataStore>,
+    /// Concrete Postgres store — used for atomic-audit `_audited` calls.
+    pub pg_store: Arc<PgDataStore>,
     /// Audit sink — soma-audit LocalSink writing to vault's own Postgres.
     pub audit: Arc<LocalSink>,
     /// Whether the session cookie should carry the `Secure` flag.
@@ -125,9 +127,11 @@ pub struct AppState {
 
 impl AppState {
     /// Construct application state with the default rate-limiter settings.
-    pub fn new(store: Arc<dyn DataStore>, audit: Arc<LocalSink>, cookie_secure: bool) -> Self {
+    pub fn new(pg_store: Arc<PgDataStore>, audit: Arc<LocalSink>, cookie_secure: bool) -> Self {
+        let store: Arc<dyn DataStore> = pg_store.clone();
         Self {
             store,
+            pg_store,
             audit,
             cookie_secure,
             auth_limiter: Arc::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW)),
@@ -369,6 +373,10 @@ fn storage_err_to_response(e: Error) -> Response {
             tracing::error!("migrate error: {msg}");
             internal_error()
         }
+        Error::Audit(msg) => {
+            tracing::error!("audit error: {msg}");
+            internal_error()
+        }
         e => {
             tracing::error!("unknown error: {e}");
             internal_error()
@@ -479,18 +487,25 @@ async fn create_token(
     Json(body): Json<CreateTokenBody>,
 ) -> Response {
     if let Err(r) = principal.require(Role::Admin) {
+        let ev = make_denied_event(&principal, "token.create", "token", "");
+        if let Err(e) = state.audit.record(&ev).await {
+            tracing::error!(err = %e, "audit denied record failed");
+        }
         return r;
     }
     // ponytail: role param accepted for future plumbing; storage create_token
     // always inserts 'admin' (column default). Role assignment needs a
     // storage-layer change outside this crate's scope.
     let _ = body.role;
-    match state.store.create_token(&principal.tenant, &body.name).await {
+    let ctx = AuditCtx {
+        actor_id: principal.token_id,
+        actor_role: principal.role.to_string(),
+        event_type: "token.create",
+        resource_type: "token",
+        resource_id: body.name.clone(),
+    };
+    match state.pg_store.create_token_audited(&principal.tenant, &body.name, &ctx).await {
         Ok((meta, plaintext)) => {
-            let ev = make_audit_event(&principal, "token.create", "token", &body.name, None);
-            if let Err(e) = state.audit.record(&ev).await {
-                tracing::error!(err = %e, "audit record failed (best-effort)");
-            }
             (
                 StatusCode::CREATED,
                 Json(json!({
@@ -518,16 +533,21 @@ async fn list_tokens(State(state): State<AppState>, principal: Principal) -> Res
 
 async fn revoke_token(State(state): State<AppState>, principal: Principal, Path(id): Path<Uuid>) -> Response {
     if let Err(r) = principal.require(Role::Admin) {
+        let ev = make_denied_event(&principal, "token.revoke", "token", &id.to_string());
+        if let Err(e) = state.audit.record(&ev).await {
+            tracing::error!(err = %e, "audit denied record failed");
+        }
         return r;
     }
-    match state.store.revoke_token(&principal.tenant, id).await {
-        Ok(()) => {
-            let ev = make_audit_event(&principal, "token.revoke", "token", &id.to_string(), None);
-            if let Err(e) = state.audit.record(&ev).await {
-                tracing::error!(err = %e, "audit record failed (best-effort)");
-            }
-            StatusCode::NO_CONTENT.into_response()
-        }
+    let ctx = AuditCtx {
+        actor_id: principal.token_id,
+        actor_role: principal.role.to_string(),
+        event_type: "token.revoke",
+        resource_type: "token",
+        resource_id: id.to_string(),
+    };
+    match state.pg_store.revoke_token_audited(&principal.tenant, id, &ctx).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => storage_err_to_response(e),
     }
 }
@@ -562,25 +582,31 @@ async fn create_project(
     Json(body): Json<CreateProjectBody>,
 ) -> Response {
     if let Err(r) = principal.require(Role::Developer) {
+        let ev = make_denied_event(&principal, "project.create", "project", &body.code);
+        if let Err(e) = state.audit.record(&ev).await {
+            tracing::error!(err = %e, "audit denied record failed");
+        }
         return r;
     }
+    let ctx = AuditCtx {
+        actor_id: principal.token_id,
+        actor_role: principal.role.to_string(),
+        event_type: "project.create",
+        resource_type: "project",
+        resource_id: body.code.clone(),
+    };
     match state
-        .store
-        .create_project(
+        .pg_store
+        .create_project_audited(
             &principal.tenant,
             &body.code,
             &body.name,
             body.description.as_deref(),
+            &ctx,
         )
         .await
     {
-        Ok(project) => {
-            let ev = make_audit_event(&principal, "project.create", "project", &body.code, None);
-            if let Err(e) = state.audit.record(&ev).await {
-                tracing::error!(err = %e, "audit record failed (best-effort)");
-            }
-            (StatusCode::CREATED, Json(project)).into_response()
-        }
+        Ok(project) => (StatusCode::CREATED, Json(project)).into_response(),
         Err(e) => storage_err_to_response(e),
     }
 }
@@ -617,20 +643,32 @@ async fn create_environment(
     Json(body): Json<CreateEnvBody>,
 ) -> Response {
     if let Err(r) = principal.require(Role::Developer) {
+        let ev = make_denied_event(&principal, "environment.create", "environment", &body.code);
+        if let Err(e) = state.audit.record(&ev).await {
+            tracing::error!(err = %e, "audit denied record failed");
+        }
         return r;
     }
+    let ctx = AuditCtx {
+        actor_id: principal.token_id,
+        actor_role: principal.role.to_string(),
+        event_type: "environment.create",
+        resource_type: "environment",
+        resource_id: body.code.clone(),
+    };
     match state
-        .store
-        .create_environment(&principal.tenant, project_id, &body.code, &body.name, body.parent_env_id)
+        .pg_store
+        .create_environment_audited(
+            &principal.tenant,
+            project_id,
+            &body.code,
+            &body.name,
+            body.parent_env_id,
+            &ctx,
+        )
         .await
     {
-        Ok(env) => {
-            let ev = make_audit_event(&principal, "environment.create", "environment", &body.code, None);
-            if let Err(e) = state.audit.record(&ev).await {
-                tracing::error!(err = %e, "audit record failed (best-effort)");
-            }
-            (StatusCode::CREATED, Json(env)).into_response()
-        }
+        Ok(env) => (StatusCode::CREATED, Json(env)).into_response(),
         Err(e) => storage_err_to_response(e),
     }
 }
@@ -701,6 +739,10 @@ async fn put_secret(
     Json(body): Json<PutSecretBody>,
 ) -> Response {
     if let Err(r) = principal.require(Role::Developer) {
+        let ev = make_denied_event(&principal, "secret.write", "secret", &params.path);
+        if let Err(e) = state.audit.record(&ev).await {
+            tracing::error!(err = %e, "audit denied record failed");
+        }
         return r;
     }
     if let Err(r) = check_env_project(&*state.store, &principal.tenant, params.project_id, params.env_id).await {
@@ -752,16 +794,19 @@ async fn get_secret(
     if let Err(r) = check_env_project(&*state.store, &principal.tenant, params.project_id, params.env_id).await {
         return r;
     }
+    let ctx = AuditCtx {
+        actor_id: principal.token_id,
+        actor_role: principal.role.to_string(),
+        event_type: "secret.read",
+        resource_type: "secret",
+        resource_id: params.path.clone(),
+    };
     match state
-        .store
-        .get_secret(&principal.tenant, params.env_id, &params.path, q.version)
+        .pg_store
+        .get_secret_audited(&principal.tenant, params.env_id, &params.path, q.version, &ctx)
         .await
     {
         Ok(revealed) => {
-            let ev = make_audit_event(&principal, "secret.read", "secret", &params.path, None);
-            if let Err(e) = state.audit.record(&ev).await {
-                tracing::error!(err = %e, "audit record failed (best-effort)");
-            }
             let value = String::from_utf8_lossy(&revealed.plaintext).into_owned();
             let mut resp = Json(json!({
                 "path": revealed.meta.path,
@@ -809,23 +854,28 @@ async fn rollback_secret(
     Json(body): Json<RollbackBody>,
 ) -> Response {
     if let Err(r) = principal.require(Role::Developer) {
+        let ev = make_denied_event(&principal, "secret.rollback", "secret", &params.path);
+        if let Err(e) = state.audit.record(&ev).await {
+            tracing::error!(err = %e, "audit denied record failed");
+        }
         return r;
     }
     if let Err(r) = check_env_project(&*state.store, &principal.tenant, params.project_id, params.env_id).await {
         return r;
     }
+    let ctx = AuditCtx {
+        actor_id: principal.token_id,
+        actor_role: principal.role.to_string(),
+        event_type: "secret.rollback",
+        resource_type: "secret",
+        resource_id: params.path.clone(),
+    };
     match state
-        .store
-        .rollback_secret(&principal.tenant, params.env_id, &params.path, body.version)
+        .pg_store
+        .rollback_secret_audited(&principal.tenant, params.env_id, &params.path, body.version, &ctx)
         .await
     {
-        Ok(secret) => {
-            let ev = make_audit_event(&principal, "secret.rollback", "secret", &params.path, None);
-            if let Err(e) = state.audit.record(&ev).await {
-                tracing::error!(err = %e, "audit record failed (best-effort)");
-            }
-            Json(secret).into_response()
-        }
+        Ok(secret) => Json(secret).into_response(),
         Err(e) => storage_err_to_response(e),
     }
 }
@@ -836,23 +886,28 @@ async fn delete_secret(
     Path(params): Path<SecretPathParams>,
 ) -> Response {
     if let Err(r) = principal.require(Role::Developer) {
+        let ev = make_denied_event(&principal, "secret.delete", "secret", &params.path);
+        if let Err(e) = state.audit.record(&ev).await {
+            tracing::error!(err = %e, "audit denied record failed");
+        }
         return r;
     }
     if let Err(r) = check_env_project(&*state.store, &principal.tenant, params.project_id, params.env_id).await {
         return r;
     }
+    let ctx = AuditCtx {
+        actor_id: principal.token_id,
+        actor_role: principal.role.to_string(),
+        event_type: "secret.delete",
+        resource_type: "secret",
+        resource_id: params.path.clone(),
+    };
     match state
-        .store
-        .delete_secret(&principal.tenant, params.env_id, &params.path)
+        .pg_store
+        .delete_secret_audited(&principal.tenant, params.env_id, &params.path, &ctx)
         .await
     {
-        Ok(()) => {
-            let ev = make_audit_event(&principal, "secret.delete", "secret", &params.path, None);
-            if let Err(e) = state.audit.record(&ev).await {
-                tracing::error!(err = %e, "audit record failed (best-effort)");
-            }
-            StatusCode::NO_CONTENT.into_response()
-        }
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => storage_err_to_response(e),
     }
 }
@@ -901,6 +956,10 @@ async fn put_config(
     Json(body): Json<PutConfigBody>,
 ) -> Response {
     if let Err(r) = principal.require(Role::Developer) {
+        let ev = make_denied_event(&principal, "config.write", "config", &params.key);
+        if let Err(e) = state.audit.record(&ev).await {
+            tracing::error!(err = %e, "audit denied record failed");
+        }
         return r;
     }
     if let Err(r) = check_env_project(&*state.store, &principal.tenant, params.project_id, params.env_id).await {
@@ -977,23 +1036,28 @@ async fn rollback_config(
     Json(body): Json<RollbackBody>,
 ) -> Response {
     if let Err(r) = principal.require(Role::Developer) {
+        let ev = make_denied_event(&principal, "config.rollback", "config", &params.key);
+        if let Err(e) = state.audit.record(&ev).await {
+            tracing::error!(err = %e, "audit denied record failed");
+        }
         return r;
     }
     if let Err(r) = check_env_project(&*state.store, &principal.tenant, params.project_id, params.env_id).await {
         return r;
     }
+    let ctx = AuditCtx {
+        actor_id: principal.token_id,
+        actor_role: principal.role.to_string(),
+        event_type: "config.rollback",
+        resource_type: "config",
+        resource_id: params.key.clone(),
+    };
     match state
-        .store
-        .rollback_config(&principal.tenant, params.env_id, &params.key, body.version)
+        .pg_store
+        .rollback_config_audited(&principal.tenant, params.env_id, &params.key, body.version, &ctx)
         .await
     {
-        Ok(ck) => {
-            let ev = make_audit_event(&principal, "config.rollback", "config", &params.key, None);
-            if let Err(e) = state.audit.record(&ev).await {
-                tracing::error!(err = %e, "audit record failed (best-effort)");
-            }
-            Json(ck).into_response()
-        }
+        Ok(ck) => Json(ck).into_response(),
         Err(e) => storage_err_to_response(e),
     }
 }
@@ -1004,23 +1068,28 @@ async fn delete_config(
     Path(params): Path<ConfigKeyParams>,
 ) -> Response {
     if let Err(r) = principal.require(Role::Developer) {
+        let ev = make_denied_event(&principal, "config.delete", "config", &params.key);
+        if let Err(e) = state.audit.record(&ev).await {
+            tracing::error!(err = %e, "audit denied record failed");
+        }
         return r;
     }
     if let Err(r) = check_env_project(&*state.store, &principal.tenant, params.project_id, params.env_id).await {
         return r;
     }
+    let ctx = AuditCtx {
+        actor_id: principal.token_id,
+        actor_role: principal.role.to_string(),
+        event_type: "config.delete",
+        resource_type: "config",
+        resource_id: params.key.clone(),
+    };
     match state
-        .store
-        .delete_config(&principal.tenant, params.env_id, &params.key)
+        .pg_store
+        .delete_config_audited(&principal.tenant, params.env_id, &params.key, &ctx)
         .await
     {
-        Ok(()) => {
-            let ev = make_audit_event(&principal, "config.delete", "config", &params.key, None);
-            if let Err(e) = state.audit.record(&ev).await {
-                tracing::error!(err = %e, "audit record failed (best-effort)");
-            }
-            StatusCode::NO_CONTENT.into_response()
-        }
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => storage_err_to_response(e),
     }
 }
@@ -1093,6 +1162,10 @@ async fn create_attr_def(
     Json(body): Json<CreateAttrDefBody>,
 ) -> Response {
     if let Err(r) = principal.require(Role::Admin) {
+        let ev = make_denied_event(&principal, "attr_def.create", "attr_def", &body.code);
+        if let Err(e) = state.audit.record(&ev).await {
+            tracing::error!(err = %e, "audit denied record failed");
+        }
         return r;
     }
     match state
@@ -1132,6 +1205,10 @@ async fn update_attr_def(
     Json(body): Json<UpdateAttrDefBody>,
 ) -> Response {
     if let Err(r) = principal.require(Role::Admin) {
+        let ev = make_denied_event(&principal, "attr_def.update", "attr_def", &id.to_string());
+        if let Err(e) = state.audit.record(&ev).await {
+            tracing::error!(err = %e, "audit denied record failed");
+        }
         return r;
     }
     match state
@@ -1156,6 +1233,10 @@ async fn delete_attr_def(
     Path(id): Path<Uuid>,
 ) -> Response {
     if let Err(r) = principal.require(Role::Admin) {
+        let ev = make_denied_event(&principal, "attr_def.delete", "attr_def", &id.to_string());
+        if let Err(e) = state.audit.record(&ev).await {
+            tracing::error!(err = %e, "audit denied record failed");
+        }
         return r;
     }
     match state.store.delete_attr_def(id).await {
@@ -1165,6 +1246,29 @@ async fn delete_attr_def(
 }
 
 // ── Audit log ─────────────────────────────────────────────────────────────────
+
+/// Build a denied `soma_audit_core::AuditEvent` when role check fails.
+fn make_denied_event(
+    principal: &Principal,
+    event_type: &str,
+    resource_type: &str,
+    resource_id: &str,
+) -> AuditEvent {
+    AuditEvent {
+        source_service: "soma-vault".to_owned(),
+        idempotency_key: Uuid::new_v4(),
+        tenant_id: principal.tenant.as_uuid(),
+        event_type: event_type.to_owned(),
+        actor_id: Some(principal.token_id),
+        actor_role: Some(principal.role.to_string()),
+        resource_type: Some(resource_type.to_owned()),
+        resource_id: Some(resource_id.to_owned()),
+        outcome: Outcome::Denied,
+        actor_ip: None,
+        occurred_at: chrono::Utc::now(),
+        metadata: serde_json::json!({}),
+    }
+}
 
 /// Build a `soma_audit_core::AuditEvent` from a `Principal` and operation details.
 fn make_audit_event(

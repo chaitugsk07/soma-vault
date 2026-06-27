@@ -2293,6 +2293,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "soma-audit-core",
+ "soma-audit-pg",
  "soma-crypto",
  "soma-infra",
  "soma-schema",
