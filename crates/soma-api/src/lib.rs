@@ -1285,8 +1285,7 @@ async fn list_audit_handler(
     let limit = q.limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE);
     match state.audit.list(
         principal.tenant.as_uuid(),
-        q.event_type.as_deref(),
-        q.cursor,
+        soma_audit_pg::ListFilter { event_type: q.event_type.as_deref(), cursor: q.cursor, ..Default::default() },
         limit,
     ).await {
         Ok((records, next_cursor)) => Json(json!({
