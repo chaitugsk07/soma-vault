@@ -1258,20 +1258,12 @@ fn make_denied_event(
     resource_type: &str,
     resource_id: &str,
 ) -> AuditEvent {
-    AuditEvent {
-        source_service: "soma-vault".to_owned(),
-        idempotency_key: Uuid::new_v4(),
-        tenant_id: principal.tenant.as_uuid(),
-        event_type: event_type.to_owned(),
-        actor_id: Some(principal.token_id),
-        actor_role: Some(principal.role.to_string()),
-        resource_type: Some(resource_type.to_owned()),
-        resource_id: Some(resource_id.to_owned()),
-        outcome: Outcome::Denied,
-        actor_ip: None,
-        occurred_at: chrono::Utc::now(),
-        metadata: serde_json::json!({}),
-    }
+    AuditEvent::builder(principal.tenant.as_uuid(), event_type, Outcome::Denied)
+        .source_service("soma-vault")
+        .actor_id(principal.token_id)
+        .actor_role(principal.role.to_string())
+        .resource(resource_type, resource_id)
+        .build()
 }
 
 

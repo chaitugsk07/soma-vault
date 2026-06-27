@@ -292,20 +292,11 @@ impl PgDataStore {
         ctx: &AuditCtx,
     ) -> crate::Result<()> {
         let Some(sink) = &self.audit else { return Ok(()); };
-        let ev = AuditEvent {
-            source_service: String::new(), // sink fills this in
-            idempotency_key: Uuid::new_v4(),
-            tenant_id: tenant.0,
-            event_type: ctx.event_type.to_owned(),
-            actor_id: Some(ctx.actor_id),
-            actor_role: Some(ctx.actor_role.clone()),
-            resource_type: Some(ctx.resource_type.to_owned()),
-            resource_id: Some(ctx.resource_id.clone()),
-            outcome: Outcome::Success,
-            actor_ip: None,
-            occurred_at: chrono::Utc::now(),
-            metadata: serde_json::json!({}),
-        };
+        let ev = AuditEvent::builder(tenant.0, ctx.event_type, Outcome::Success)
+            .actor_id(ctx.actor_id)
+            .actor_role(&ctx.actor_role)
+            .resource(ctx.resource_type, &ctx.resource_id)
+            .build();
         sink.record_in_tx(&ev, tx)
             .await
             .map_err(|e| crate::Error::Audit(e.to_string()))?;
@@ -837,20 +828,11 @@ impl PgDataStore {
         // Build the audit event before the version write so it commits together.
         let audit_ev = self.audit.as_ref().map(|sink| (
             sink.as_ref(),
-            AuditEvent {
-                source_service: String::new(),
-                idempotency_key: Uuid::new_v4(),
-                tenant_id: tenant.0,
-                event_type: ctx.event_type.to_owned(),
-                actor_id: Some(ctx.actor_id),
-                actor_role: Some(ctx.actor_role.clone()),
-                resource_type: Some(ctx.resource_type.to_owned()),
-                resource_id: Some(ctx.resource_id.clone()),
-                outcome: Outcome::Success,
-                actor_ip: None,
-                occurred_at: chrono::Utc::now(),
-                metadata: serde_json::json!({}),
-            },
+            AuditEvent::builder(tenant.0, ctx.event_type, Outcome::Success)
+                .actor_id(ctx.actor_id)
+                .actor_role(&ctx.actor_role)
+                .resource(ctx.resource_type, &ctx.resource_id)
+                .build(),
         ));
 
         // QW-5/QW-8: derive per-tenant KEK, encrypt inside the row lock.
@@ -958,20 +940,11 @@ impl PgDataStore {
         // Build the audit event before the version write so it commits together.
         let audit_ev = self.audit.as_ref().map(|sink| (
             sink.as_ref(),
-            AuditEvent {
-                source_service: String::new(),
-                idempotency_key: Uuid::new_v4(),
-                tenant_id: tenant.0,
-                event_type: ctx.event_type.to_owned(),
-                actor_id: Some(ctx.actor_id),
-                actor_role: Some(ctx.actor_role.clone()),
-                resource_type: Some(ctx.resource_type.to_owned()),
-                resource_id: Some(ctx.resource_id.clone()),
-                outcome: Outcome::Success,
-                actor_ip: None,
-                occurred_at: chrono::Utc::now(),
-                metadata: serde_json::json!({}),
-            },
+            AuditEvent::builder(tenant.0, ctx.event_type, Outcome::Success)
+                .actor_id(ctx.actor_id)
+                .actor_role(&ctx.actor_role)
+                .resource(ctx.resource_type, &ctx.resource_id)
+                .build(),
         ));
 
         let new_version = ledger::advance_config_version_in_tx(
