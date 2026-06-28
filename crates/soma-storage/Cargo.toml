@@ -10,6 +10,7 @@ soma-crypto = { path = "../soma-crypto" }
 soma-audit-core = { path = "../../../soma-audit/crates/soma-audit-core" }
 soma-audit-pg = { path = "../../../soma-audit/crates/soma-audit-pg" }
 soma-schema = { workspace = true }
+soma-infra = { path = "../../../soma-infra", features = ["crypto"] }
 sqlx = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -19,11 +20,10 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 secrecy = { workspace = true }
 zeroize = { workspace = true }
-sha2 = { workspace = true }
 rand = { workspace = true }
 hex = "0.4"
 async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true }
-soma-infra = { path = "../../../soma-infra", features = ["testing"] }
+soma-infra = { path = "../../../soma-infra", features = ["testing", "crypto"] }

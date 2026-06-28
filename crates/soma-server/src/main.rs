@@ -13,11 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::{
-    body::Body,
-    http::{header, Request, Response, StatusCode},
-    routing::get,
-};
+use axum::http::Uri;
 use rust_embed::RustEmbed;
 use soma_api::AppState;
 use soma_infra::{connect_from_env, telemetry};
@@ -34,44 +30,6 @@ use tracing::info;
 #[derive(RustEmbed)]
 #[folder = "../../dashboard/dist"]
 struct Portal;
-
-// ── Portal handler (SPA fallback) ─────────────────────────────────────────────
-
-async fn portal_handler(req: Request<Body>) -> Response<Body> {
-    let path = req.uri().path().trim_start_matches('/');
-
-    // Try the exact requested asset, then fall back to index.html.
-    let (data, mime) = if let Some(f) = Portal::get(path) {
-        let mime = mime_guess::from_path(path)
-            .first_or_octet_stream()
-            .to_string();
-        (f.data, mime)
-    } else if let Some(index) = Portal::get("index.html") {
-        (index.data, "text/html; charset=utf-8".to_owned())
-    } else {
-        // Empty dist — return a built-in stub so the server is still usable.
-        let stub = r#"<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>soma-vault</title></head>
-<body>
-<h1>soma-vault</h1>
-<p>Portal not bundled. Run <code>trunk build</code> inside <code>dashboard/</code>
-and rebuild the server to embed the portal.</p>
-</body>
-</html>"#;
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-            .body(Body::from(stub))
-            .expect("static response is valid");
-    };
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mime)
-        .body(Body::from(data.into_owned()))
-        .expect("asset response is valid")
-}
 
 // ── Token bootstrap ───────────────────────────────────────────────────────────
 
@@ -182,12 +140,11 @@ async fn main() -> Result<()> {
     telemetry::init();
 
     // 2. Config from env.
-    let bind_addr = std::env::var("SOMA_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let bind_addr = soma_infra::config::env_or("SOMA_BIND", "0.0.0.0:8080");
     let cookie_secure = std::env::var("SOMA_COOKIE_SECURE")
         .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
         .unwrap_or(true);
-    let token_file =
-        std::env::var("SOMA_TOKEN_FILE").unwrap_or_else(|_| "./soma-root-token".into());
+    let token_file = soma_infra::config::env_or("SOMA_TOKEN_FILE", "./soma-root-token");
 
     // Fail fast on missing/invalid KEK.
     let kek = MasterKek::from_hex_env().context(
@@ -241,7 +198,7 @@ async fn main() -> Result<()> {
     let state = AppState::new(store, audit_sink, cookie_secure);
 
     let app = soma_api::router(state)
-        .fallback(get(portal_handler))
+        .fallback(|uri: Uri| async move { soma_infra::web::serve_spa::<Portal>(&uri) })
         .layer(TraceLayer::new_for_http());
 
     // 7. Serve.
@@ -256,35 +213,13 @@ async fn main() -> Result<()> {
     );
 
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async {
+            soma_infra::signal::shutdown_signal().await;
+            info!("shutdown signal received");
+        })
         .await
         .context("server error")?;
 
     Ok(())
 }
 
-// ── Graceful shutdown: Ctrl-C + SIGTERM ───────────────────────────────────────
-
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl-C handler");
-    };
-
-    #[cfg(unix)]
-    let sigterm = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let sigterm = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c   => info!("received Ctrl-C, shutting down"),
-        () = sigterm  => info!("received SIGTERM, shutting down"),
-    }
-}

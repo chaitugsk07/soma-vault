@@ -199,10 +199,7 @@ impl SomaClientBuilder {
                 Error::Config("environment is required (set via .environment() or SOMA_ENVIRONMENT)".into())
             })?;
 
-        let http = reqwest::Client::builder()
-            .use_rustls_tls()
-            .build()
-            .map_err(Error::Transport)?;
+        let http = soma_infra::http::client().map_err(Error::Transport)?;
 
         Ok(SomaClient {
             http,

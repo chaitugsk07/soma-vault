@@ -8,7 +8,6 @@ repository.workspace = true
 [dependencies]
 aes-gcm = { workspace = true }
 aes-kw = { workspace = true }
-hkdf = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { workspace = true }
 secrecy = { workspace = true }
@@ -17,7 +16,7 @@ uuid = { workspace = true }
 subtle = { workspace = true }
 thiserror = { workspace = true }
 hex = "0.4"
-hmac = { workspace = true }
+soma-infra = { path = "../../../soma-infra", features = ["crypto"] }
 
 [dev-dependencies]
 # nothing extra needed

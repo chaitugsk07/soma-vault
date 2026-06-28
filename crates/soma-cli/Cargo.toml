@@ -21,7 +21,7 @@ tracing = { workspace = true }
 dirs = "5"
 soma-crypto = { path = "../soma-crypto" }
 soma-schema = { workspace = true }
-soma-infra = { path = "../../../soma-infra", features = ["db", "tracing"] }
+soma-infra = { path = "../../../soma-infra", features = ["db", "tracing", "http"] }
 
 [dev-dependencies]
 soma-api = { path = "../soma-api" }

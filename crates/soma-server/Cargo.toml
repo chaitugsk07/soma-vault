@@ -13,7 +13,7 @@ path = "src/main.rs"
 soma-api     = { path = "../soma-api" }
 soma-storage = { path = "../soma-storage" }
 soma-crypto  = { path = "../soma-crypto" }
-soma-infra   = { path = "../../../soma-infra", features = ["db", "tracing"] }
+soma-infra   = { path = "../../../soma-infra", features = ["db", "tracing", "signal", "crypto", "config", "web"] }
 soma-audit-pg = { path = "../../../soma-audit/crates/soma-audit-pg" }
 
 tokio       = { workspace = true }
@@ -23,7 +23,6 @@ tower-http  = { workspace = true, features = ["trace"] }
 tracing     = { workspace = true }
 anyhow      = { workspace = true }
 rust-embed  = { workspace = true }
-mime_guess  = "2"
 rand        = { workspace = true }
 sha2        = { workspace = true }
 hex         = "0.4"

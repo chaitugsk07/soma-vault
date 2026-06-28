@@ -29,7 +29,6 @@ use aes_gcm::{
     aead::{Aead, AeadCore, OsRng},
     Aes256Gcm, KeyInit, Nonce,
 };
-use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -220,10 +219,15 @@ impl MasterKek {
         // ponytail: HKDF expand is infallible for output lengths ≤ 255 * hash_len.
         // 32 bytes << 255 * 32, so the unwrap is safe.
         const SALT: &[u8] = b"soma-vault-tenant-kek-v1";
-        let hk = Hkdf::<Sha256>::new(Some(SALT), self.0.as_ref());
+        let derived = soma_infra::crypto::hkdf_sha256(
+            self.0.as_ref(),
+            Some(SALT),
+            tenant_id.as_bytes(),
+            32,
+        )
+        .expect("32 bytes is a valid HKDF output length");
         let mut okm = Zeroizing::new([0u8; 32]);
-        hk.expand(tenant_id.as_bytes(), okm.as_mut())
-            .expect("32 bytes is a valid HKDF output length");
+        okm.copy_from_slice(&derived);
         TenantKek(okm)
     }
 
@@ -243,10 +247,15 @@ impl MasterKek {
     #[must_use]
     pub fn derive_audit_hmac_key(&self) -> [u8; 32] {
         const SALT: &[u8] = b"soma-vault-audit-hmac-v1";
-        let hk = Hkdf::<Sha256>::new(Some(SALT), self.0.as_ref());
+        let derived = soma_infra::crypto::hkdf_sha256(
+            self.0.as_ref(),
+            Some(SALT),
+            b"audit",
+            32,
+        )
+        .expect("32 bytes is a valid HKDF output length");
         let mut okm = [0u8; 32];
-        hk.expand(b"audit", &mut okm)
-            .expect("32 bytes is a valid HKDF output length");
+        okm.copy_from_slice(&derived);
         okm
     }
 }
@@ -435,19 +444,9 @@ pub fn decrypt_checked(
 /// Compute HMAC-SHA256 over `msg` using `key`, returning hex-encoded output.
 ///
 /// Used by the audit log to produce and verify `entry_hash`.
-///
-/// # Panics
-///
-/// Never panics in practice: HMAC accepts keys of any length; the `expect` is
-/// unreachable for any non-empty key slice.
 #[must_use]
 pub fn audit_hmac_hex(key: &[u8; 32], msg: &str) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    type HmacSha256 = Hmac<Sha256>;
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key size");
-    mac.update(msg.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+    soma_infra::crypto::hmac_sha256_hex(key, msg.as_bytes())
 }
 
 /// Unwrap `wrapped_dek` under `old_kek` and re-wrap under `new_kek`.

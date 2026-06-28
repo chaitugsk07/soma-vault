@@ -271,13 +271,11 @@ async fn auth_middleware(
     next: Next,
 ) -> Response {
     // Bearer token takes priority over cookie.
-    let raw_token = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_owned)
-        .or_else(|| jar.get("soma_session").map(|c| c.value().to_owned()));
+    let raw_token = soma_infra::web::extract_bearer(
+        request.headers().get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+    )
+    .map(str::to_owned)
+    .or_else(|| jar.get("soma_session").map(|c| c.value().to_owned()));
 
     let Some(token) = raw_token else {
         return unauthorized();
