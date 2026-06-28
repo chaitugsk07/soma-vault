@@ -13,11 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::{
-    body::Body,
-    http::{header, Request, Response, StatusCode},
-    routing::get,
-};
+use axum::http::Uri;
 use rust_embed::RustEmbed;
 use soma_api::AppState;
 use soma_infra::{connect_from_env, telemetry};
@@ -34,44 +30,6 @@ use tracing::info;
 #[derive(RustEmbed)]
 #[folder = "../../dashboard/dist"]
 struct Portal;
-
-// ── Portal handler (SPA fallback) ─────────────────────────────────────────────
-
-async fn portal_handler(req: Request<Body>) -> Response<Body> {
-    let path = req.uri().path().trim_start_matches('/');
-
-    // Try the exact requested asset, then fall back to index.html.
-    let (data, mime) = if let Some(f) = Portal::get(path) {
-        let mime = mime_guess::from_path(path)
-            .first_or_octet_stream()
-            .to_string();
-        (f.data, mime)
-    } else if let Some(index) = Portal::get("index.html") {
-        (index.data, "text/html; charset=utf-8".to_owned())
-    } else {
-        // Empty dist — return a built-in stub so the server is still usable.
-        let stub = r#"<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>soma-vault</title></head>
-<body>
-<h1>soma-vault</h1>
-<p>Portal not bundled. Run <code>trunk build</code> inside <code>dashboard/</code>
-and rebuild the server to embed the portal.</p>
-</body>
-</html>"#;
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-            .body(Body::from(stub))
-            .expect("static response is valid");
-    };
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mime)
-        .body(Body::from(data.into_owned()))
-        .expect("asset response is valid")
-}
 
 // ── Token bootstrap ───────────────────────────────────────────────────────────
 
@@ -240,7 +198,7 @@ async fn main() -> Result<()> {
     let state = AppState::new(store, audit_sink, cookie_secure);
 
     let app = soma_api::router(state)
-        .fallback(get(portal_handler))
+        .fallback(|uri: Uri| async move { soma_infra::web::serve_spa::<Portal>(&uri) })
         .layer(TraceLayer::new_for_http());
 
     // 7. Serve.

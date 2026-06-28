@@ -2249,13 +2249,16 @@ dependencies = [
 
 [[package]]
 name = "soma-infra"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "argon2",
+ "axum",
  "hkdf",
  "hmac",
+ "mime_guess",
  "reqwest",
+ "rust-embed",
  "sha2",
  "sqlx",
  "thiserror 2.0.18",
@@ -2301,7 +2304,6 @@ dependencies = [
  "anyhow",
  "axum",
  "hex",
- "mime_guess",
  "rand 0.8.6",
  "rust-embed",
  "sha2",
