@@ -182,12 +182,11 @@ async fn main() -> Result<()> {
     telemetry::init();
 
     // 2. Config from env.
-    let bind_addr = std::env::var("SOMA_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let bind_addr = soma_infra::config::env_or("SOMA_BIND", "0.0.0.0:8080");
     let cookie_secure = std::env::var("SOMA_COOKIE_SECURE")
         .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
         .unwrap_or(true);
-    let token_file =
-        std::env::var("SOMA_TOKEN_FILE").unwrap_or_else(|_| "./soma-root-token".into());
+    let token_file = soma_infra::config::env_or("SOMA_TOKEN_FILE", "./soma-root-token");
 
     // Fail fast on missing/invalid KEK.
     let kek = MasterKek::from_hex_env().context(
@@ -256,35 +255,13 @@ async fn main() -> Result<()> {
     );
 
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async {
+            soma_infra::signal::shutdown_signal().await;
+            info!("shutdown signal received");
+        })
         .await
         .context("server error")?;
 
     Ok(())
 }
 
-// ── Graceful shutdown: Ctrl-C + SIGTERM ───────────────────────────────────────
-
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl-C handler");
-    };
-
-    #[cfg(unix)]
-    let sigterm = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let sigterm = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c   => info!("received Ctrl-C, shutting down"),
-        () = sigterm  => info!("received SIGTERM, shutting down"),
-    }
-}

@@ -10,12 +10,13 @@ members = [
 ]
 exclude = ["dashboard"]
 
-# Keep dev target/ lean. line-tables-only gives panic line numbers (file:line in
-# backtraces) without the multi-GB full debuginfo; incremental = false drops the
-# ~1.3 GB incremental cache at the cost of slightly slower rebuilds. Bump debug to
-# true (and incremental to true) locally only if you need a step debugger / fast edit loops.
+# Keep dev target/ lean. debug = false drops ALL debuginfo (no multi-GB target/);
+# strip = true removes symbols too; incremental = false drops the ~1.3 GB cache.
+# Prefer `cargo build --release` for real runs. Bump debug locally only if you
+# genuinely need a step debugger.
 [profile.dev]
-debug = "line-tables-only"
+debug = false
+strip = true
 incremental = false
 
 [workspace.package]

@@ -10,6 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 reqwest = { workspace = true }
+soma-infra = { path = "../../../soma-infra", features = ["http"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -358,7 +358,7 @@ impl Ctx {
         let token = cli_token
             .or(creds.token)
             .context("no token: pass --token, set SOMA_TOKEN, or run `soma login`")?;
-        let client = reqwest::Client::new();
+        let client = soma_infra::http::client().context("failed to build HTTP client")?;
         Ok(Self {
             server,
             token,

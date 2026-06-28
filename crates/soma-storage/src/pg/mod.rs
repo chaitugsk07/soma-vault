@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -341,7 +340,7 @@ impl PgDataStore {
         let mut raw = vec![0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut raw);
         let token_str = hex::encode(&raw);
-        let hash = hex::encode(Sha256::digest(token_str.as_bytes()));
+        let hash = soma_infra::crypto::sha256_hex(token_str.as_bytes());
 
         let mut tx = self.tenant_tx(tenant).await?;
 
@@ -2210,7 +2209,7 @@ impl DataStore for PgDataStore {
         let mut raw = vec![0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut raw);
         let token_str = hex::encode(&raw);
-        let hash = hex::encode(Sha256::digest(token_str.as_bytes()));
+        let hash = soma_infra::crypto::sha256_hex(token_str.as_bytes());
 
         let mut tx = self.tenant_tx(tenant).await?;
 
@@ -2241,7 +2240,7 @@ impl DataStore for PgDataStore {
         // `token_lookup` policy on 11_fct_auth_tokens permits SELECT when
         // app.tenant_id is absent.  Possession of the correct 256-bit hash is
         // the authentication factor, so this broad SELECT is safe.
-        let hash = hex::encode(Sha256::digest(token.as_bytes()));
+        let hash = soma_infra::crypto::sha256_hex(token.as_bytes());
 
         let row: Option<AuthTokenRow> = sqlx::query_as(
             r#"SELECT id, tenant_id, name, role, created_at, last_used_at
@@ -2338,7 +2337,7 @@ impl DataStore for PgDataStore {
         name: &str,
         plaintext: &str,
     ) -> Result<AuthToken> {
-        let hash = hex::encode(Sha256::digest(plaintext.as_bytes()));
+        let hash = soma_infra::crypto::sha256_hex(plaintext.as_bytes());
 
         let mut tx = self.tenant_tx(tenant).await?;
 

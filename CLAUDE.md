@@ -134,6 +134,14 @@ It is part of the **soma-platform** suite and is a SEPARATE product from **soma-
 
 The full PRD lives under **`docs/`** — vision/positioning, Phase-1 scope, architecture + crypto/auto-unseal, REST API, data model + soma-iam boundary, config management, CLI/SDK, dashboard, Kubernetes/cloud-native deployment, pricing/licensing, roadmap, and competitive/domain appendices. Keep `docs/` and this section in sync. Apply **YAGNI**: smallest credible Phase 1, with the tenets above as the foundation.
 
+### Shared components — consume soma-infra, do NOT re-implement plumbing
+
+Platform-wide rule: `../CLAUDE.md` ("Shared components"). As it applies to soma-vault:
+
+- **All reusable backend plumbing comes from `soma-infra`** (`../soma-infra`, path dep). Already consumed for: Postgres pool (`soma_infra::connect_from_env`), telemetry (`telemetry::init`), graceful shutdown (`signal::shutdown_signal`), crypto primitives (`crypto::hkdf_sha256` / `hmac_sha256_hex` / `sha256_hex`), env helpers (`config::env_or`), SDK/CLI HTTP client (`http::client`). All UI comes from `soma-ui`.
+- **Do NOT hand-roll** a Postgres pool, a `tracing_subscriber` init, a `shutdown_signal`, an `Hkdf`/`Hmac`/`Sha256`-to-hex, an AEAD encrypt/Argon2 hash, or a `reqwest::Client` builder. Need a primitive soma-infra lacks? Add the generic primitive there (vault supplying its own parameters), not a local copy.
+- **Stays in soma-vault (logic, correctly local):** the 3-layer envelope/KEK scheme + AES-KW wrapping in `soma-crypto`; the HKDF salt/info strings (`"soma-vault-tenant-kek-v1"`, `"soma-vault-audit-hmac-v1"`) passed *into* the infra primitive; `MasterKek::from_hex`; `map_sqlx` (SQLSTATE → domain errors incl. `WhitelistViolation`); the `Migrator` wiring (schema `01_vault`, its advisory lock key). The short root-token fingerprint `hex::encode(&digest[..4])` is NOT `sha256_hex` — leave it.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

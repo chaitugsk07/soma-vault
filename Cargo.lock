@@ -127,6 +127,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures",
+ "password-hash",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -252,6 +264,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest",
 ]
 
 [[package]]
@@ -1450,6 +1471,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2147,11 +2179,9 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "ed25519-dalek",
- "hkdf",
- "hmac",
  "serde",
  "serde_json",
- "sha2",
+ "soma-infra",
  "thiserror 2.0.18",
  "uuid",
  "zeroize",
@@ -2164,13 +2194,10 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "futures",
- "hkdf",
- "hmac",
  "include_dir",
  "rand 0.8.6",
  "serde",
  "serde_json",
- "sha2",
  "soma-audit-core",
  "soma-schema",
  "sqlx",
@@ -2210,11 +2237,10 @@ dependencies = [
  "aes-gcm",
  "aes-kw",
  "hex",
- "hkdf",
- "hmac",
  "rand 0.8.6",
  "secrecy",
  "sha2",
+ "soma-infra",
  "subtle",
  "thiserror 2.0.18",
  "uuid",
@@ -2225,12 +2251,19 @@ dependencies = [
 name = "soma-infra"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
+ "argon2",
+ "hkdf",
+ "hmac",
+ "reqwest",
+ "sha2",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2256,6 +2289,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "soma-infra",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -2293,7 +2327,6 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "sha2",
  "soma-audit-core",
  "soma-audit-pg",
  "soma-crypto",
